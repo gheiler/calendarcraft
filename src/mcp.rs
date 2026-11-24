@@ -168,6 +168,7 @@ pub fn call_tool(store: &mut CalendarStore, name: &str, args: &Value) -> Result<
                 email: email.to_string(),
                 server_url,
                 enabled: true,
+                ..Default::default()
             };
             let calendar = CalendarSource {
                 id: cal_id.clone(),
@@ -176,6 +177,7 @@ pub fn call_tool(store: &mut CalendarStore, name: &str, args: &Value) -> Result<
                 color_hex: color_hex.to_string(),
                 visible: true,
                 read_only: false,
+                ..Default::default()
             };
             store.accounts.push(account.clone());
             store.calendars.push(calendar.clone());
@@ -312,6 +314,7 @@ pub fn call_tool(store: &mut CalendarStore, name: &str, args: &Value) -> Result<
                 notes,
                 attendees: Vec::new(),
                 alert_minutes_before: Some(10),
+                ..Default::default()
             };
             store.events.push(ev.clone());
             Ok(json!({ "status": "created", "event": ev }))

@@ -1,7 +1,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native_cli {
     use calendarcraft::mcp::handle_mcp_request;
-    use calendarcraft::{CalendarCraftApp, CalendarStore};
+    use calendarcraft::model::ViewMode;
+    use calendarcraft::{CalendarCraftApp, CalendarStore, Launch};
     use clap::Parser;
     use eframe::egui;
     use std::io::{self, BufRead, Write};
@@ -24,9 +25,41 @@ mod native_cli {
         #[arg(long)]
         pub mcp: bool,
 
-        /// Start normally, draw ~120 frames without stealing focus, save PNG screenshot and exit
+        /// Start normally, draw ~90 frames without stealing focus, save PNG screenshot and exit
         #[arg(long)]
         pub screenshot: Option<String>,
+
+        /// Open in this view: day, week, month, quarter or year
+        #[arg(long)]
+        pub view: Option<String>,
+
+        /// light, dark or system
+        #[arg(long)]
+        pub theme: Option<String>,
+
+        /// Show this day (YYYY-MM-DD)
+        #[arg(long)]
+        pub date: Option<String>,
+
+        /// Interface language (en, de, es, fr, it, pt-br or auto)
+        #[arg(long)]
+        pub lang: Option<String>,
+
+        /// Use the sample calendars instead of what is stored
+        #[arg(long)]
+        pub demo: bool,
+
+        /// Open the details of this event (for screenshots)
+        #[arg(long)]
+        pub open_event: Option<String>,
+
+        /// Open the new-event dialog (for screenshots)
+        #[arg(long)]
+        pub new_event: bool,
+
+        /// Window size in points, e.g. 1320x840 (390x844 shows the phone layout)
+        #[arg(long)]
+        pub size: Option<String>,
     }
 
     pub fn run_stdio_mcp(config_path: Option<&str>) -> io::Result<()> {
@@ -84,20 +117,28 @@ mod native_cli {
             return Ok(());
         }
 
-        let (store, resolved_cfg) = CalendarStore::load_from_path_or_default(args.config.as_deref());
+        let (store, resolved_cfg) = match args.config.as_deref() {
+            Some(path) => {
+                let (s, p) = CalendarStore::load_from_path_or_default(Some(path));
+                (Some(s), p)
+            }
+            None => (None, None),
+        };
         let is_screenshot = args.screenshot.is_some();
+        let size = args
+            .size
+            .as_deref()
+            .and_then(|s| s.split_once('x'))
+            .and_then(|(w, h)| Some([w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?]))
+            .unwrap_or([1320.0, 840.0]);
 
         let mut viewport = egui::ViewportBuilder::default()
             .with_title("CalendarCraft")
-            .with_inner_size([1320.0, 840.0])
-            .with_min_inner_size([900.0, 600.0]);
+            .with_inner_size(size)
+            .with_min_inner_size([360.0, 560.0]);
 
         if is_screenshot {
             viewport = viewport.with_active(false);
-            #[cfg(target_os = "windows")]
-            {
-                viewport = viewport.with_window_level(egui::WindowLevel::AlwaysOnBottom);
-            }
         }
 
         #[allow(unused_mut)]
@@ -114,18 +155,18 @@ mod native_cli {
             }));
         }
 
-        let screenshot_path = args.screenshot.clone();
-        eframe::run_native(
-            "CalendarCraft",
-            options,
-            Box::new(move |_cc| {
-                Ok(Box::new(CalendarCraftApp::new(
-                    store,
-                    resolved_cfg,
-                    screenshot_path,
-                )))
-            }),
-        )
+        let launch = Launch {
+            config_path: resolved_cfg,
+            screenshot: args.screenshot.clone(),
+            view: args.view.as_deref().and_then(|v| serde_json::from_value::<ViewMode>(serde_json::Value::String(v.to_ascii_lowercase())).ok()),
+            theme: args.theme.clone(),
+            date: args.date.as_deref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()),
+            open_event: args.open_event.clone(),
+            new_event: args.new_event,
+            demo: args.demo,
+            language: args.lang.clone(),
+        };
+        eframe::run_native("CalendarCraft", options, Box::new(move |_cc| Ok(Box::new(CalendarCraftApp::new(store, launch)))))
     }
 }
 
@@ -135,4 +176,6 @@ fn main() -> eframe::Result {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn main() {}
+fn main() {
+    let _ = calendarcraft::wasm_start();
+}

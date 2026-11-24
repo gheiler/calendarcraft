@@ -78,7 +78,22 @@ impl Default for AppSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// How an account's calendars are reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountKind {
+    /// Kept in this app only (the sample data, or calendars made here).
+    #[default]
+    Local,
+    /// A CalDAV server (Stalwart, iCloud, Fastmail, Nextcloud, Google…), read and written.
+    Caldav,
+    /// An `.ics` subscription URL, read only.
+    Ics,
+    /// The `.ics` file opened from the host (artcraftCloud's drive); saved back through the bridge.
+    File,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AccountConfig {
     pub id: String,
     pub name: String,
@@ -88,13 +103,24 @@ pub struct AccountConfig {
     pub server_url: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub kind: AccountKind,
+    /// Sign-in name for CalDAV (often the email address). The password is never stored here.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// The host signs requests itself (artcraftCloud's same-origin `/caldav/` proxy): no password.
+    #[serde(default)]
+    pub host_managed: bool,
+    /// Go through the host's proxy (browsers block most CalDAV servers by CORS).
+    #[serde(default)]
+    pub via_proxy: bool,
 }
 
 fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CalendarSource {
     pub id: String,
     pub account_id: String,
@@ -104,6 +130,12 @@ pub struct CalendarSource {
     pub visible: bool,
     #[serde(default)]
     pub read_only: bool,
+    /// The calendar collection on the server (CalDAV) or the feed (ICS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The collection's `getctag` / sync token when last read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctag: Option<String>,
 }
 
 impl CalendarSource {
@@ -119,12 +151,30 @@ pub struct CalendarSet {
     pub calendar_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct CalendarEvent {
     pub id: String,
     pub calendar_id: String,
     pub title: String,
     pub date: NaiveDate,
+    /// Last day of an event that spans days (inclusive); `None` for one-day events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<NaiveDate>,
+    /// iCalendar UID (made from `id` when empty).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uid: String,
+    /// The event's resource on a CalDAV server, and its ETag when read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    /// A repeat rule kept as text (`RRULE` value) so it survives a round trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rrule: Option<String>,
+    /// Read only here: one of several events in the same server resource (a repeating series
+    /// with changed occurrences), which CalendarCraft cannot write back without losing the rest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
     pub start_time: Option<NaiveTime>,
     pub end_time: Option<NaiveTime>,
     #[serde(default)]
@@ -139,6 +189,35 @@ pub struct CalendarEvent {
     pub attendees: Vec<String>,
     #[serde(default)]
     pub alert_minutes_before: Option<u32>,
+}
+
+impl CalendarEvent {
+    /// Whether the event shows on `day`.
+    pub fn covers(&self, day: NaiveDate) -> bool {
+        let span = self.end_date.filter(|end| *end > self.date).map(|end| (end - self.date).num_days()).unwrap_or(0);
+        match self.rrule.as_deref().and_then(crate::recur::parse) {
+            None => day >= self.date && day <= self.date + Duration::days(span),
+            Some(rule) => (0..=span).any(|k| crate::recur::occurs_on(&rule, self.date, day - Duration::days(k))),
+        }
+    }
+
+    /// Whether `day` is the first day of an occurrence (not a continuation of a multi-day one).
+    pub fn starts_on(&self, day: NaiveDate) -> bool {
+        match self.rrule.as_deref().and_then(crate::recur::parse) {
+            None => day == self.date,
+            Some(rule) => crate::recur::occurs_on(&rule, self.date, day),
+        }
+    }
+
+    pub fn uid_or_id(&self) -> String {
+        if self.uid.is_empty() { format!("{}@calendarcraft", self.id) } else { self.uid.clone() }
+    }
+
+    /// Minutes from midnight, for ordering; all-day events first.
+    pub fn sort_key(&self) -> (u8, u32) {
+        use chrono::Timelike;
+        if self.all_day { (0, 0) } else { (1, self.start_time.map(|t| t.hour() * 60 + t.minute()).unwrap_or(0)) }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +260,18 @@ impl Default for CalendarStore {
 }
 
 impl CalendarStore {
+    /// No accounts or events: what a host that brings its own accounts starts from.
+    pub fn empty() -> Self {
+        Self {
+            settings: AppSettings { default_calendar_id: String::new(), active_calendar_set: Some("set_all".into()), ..AppSettings::default() },
+            accounts: Vec::new(),
+            calendars: Vec::new(),
+            calendar_sets: vec![CalendarSet { id: "set_all".into(), name: "All".into(), calendar_ids: Vec::new() }],
+            events: Vec::new(),
+            tasks: Vec::new(),
+        }
+    }
+
     pub fn from_json_str(json: &str) -> Result<Self, String> {
         serde_json::from_str(json).map_err(|e| format!("Invalid config JSON: {e}"))
     }
@@ -264,7 +355,7 @@ impl CalendarStore {
         let mut list: Vec<&CalendarEvent> = self
             .events
             .iter()
-            .filter(|ev| ev.date == date && self.is_calendar_visible(&ev.calendar_id))
+            .filter(|ev| ev.covers(date) && self.is_calendar_visible(&ev.calendar_id))
             .filter(|ev| {
                 if q.is_empty() {
                     true
@@ -311,6 +402,7 @@ impl CalendarStore {
                 email: "alex@acme.dev".to_string(),
                 server_url: Some("https://apidata.googleusercontent.com/caldav/v2".to_string()),
                 enabled: true,
+                ..Default::default()
             },
             AccountConfig {
                 id: "acc_personal".to_string(),
@@ -319,6 +411,7 @@ impl CalendarStore {
                 email: "alex@icloud.com".to_string(),
                 server_url: Some("https://caldav.icloud.com".to_string()),
                 enabled: true,
+                ..Default::default()
             },
             AccountConfig {
                 id: "acc_studio".to_string(),
@@ -327,6 +420,7 @@ impl CalendarStore {
                 email: "studio@craft.design".to_string(),
                 server_url: Some("https://caldav.fastmail.com".to_string()),
                 enabled: true,
+                ..Default::default()
             },
         ];
 
@@ -335,41 +429,46 @@ impl CalendarStore {
                 id: "cal_work".to_string(),
                 account_id: "acc_work".to_string(),
                 name: "Engineering".to_string(),
-                color_hex: "#3B82F6".to_string(),
+                color_hex: "#33D1FF".to_string(),
                 visible: true,
                 read_only: false,
+                ..Default::default()
             },
             CalendarSource {
                 id: "cal_product".to_string(),
                 account_id: "acc_work".to_string(),
                 name: "Product Launches".to_string(),
-                color_hex: "#8B5CF6".to_string(),
+                color_hex: "#B899EB".to_string(),
                 visible: true,
                 read_only: false,
+                ..Default::default()
             },
             CalendarSource {
                 id: "cal_personal".to_string(),
                 account_id: "acc_personal".to_string(),
                 name: "Personal".to_string(),
-                color_hex: "#10B981".to_string(),
+                color_hex: "#71DD8C".to_string(),
                 visible: true,
                 read_only: false,
+                ..Default::default()
             },
             CalendarSource {
                 id: "cal_family".to_string(),
                 account_id: "acc_personal".to_string(),
                 name: "Family & Travel".to_string(),
-                color_hex: "#F59E0B".to_string(),
+                color_hex: "#FFB55B".to_string(),
                 visible: true,
                 read_only: false,
+                ..Default::default()
             },
             CalendarSource {
                 id: "cal_studio".to_string(),
                 account_id: "acc_studio".to_string(),
                 name: "Client Reviews".to_string(),
-                color_hex: "#EC4899".to_string(),
+                color_hex: "#6BE6D3".to_string(),
                 visible: true,
                 read_only: false,
+                ..Default::default()
             },
         ];
 
@@ -411,6 +510,7 @@ impl CalendarStore {
                 notes: "Feature freeze and release candidate sign-off.".to_string(),
                 attendees: vec!["team@acme.dev".to_string()],
                 alert_minutes_before: Some(60),
+                ..Default::default()
             },
             CalendarEvent {
                 id: "ev_2".to_string(),
@@ -425,6 +525,7 @@ impl CalendarStore {
                 notes: "Review Rust & WebAssembly shared core layout.".to_string(),
                 attendees: vec!["maya@acme.dev".to_string(), "liam@acme.dev".to_string()],
                 alert_minutes_before: Some(10),
+                ..Default::default()
             },
             CalendarEvent {
                 id: "ev_3".to_string(),
@@ -439,6 +540,7 @@ impl CalendarStore {
                 notes: "5km tempo run.".to_string(),
                 attendees: vec![],
                 alert_minutes_before: Some(15),
+                ..Default::default()
             },
             CalendarEvent {
                 id: "ev_4".to_string(),
@@ -453,6 +555,7 @@ impl CalendarStore {
                 notes: "Live test of JSON-RPC tool calls against preloaded accounts.".to_string(),
                 attendees: vec!["alex@acme.dev".to_string(), "sam@acme.dev".to_string()],
                 alert_minutes_before: Some(10),
+                ..Default::default()
             },
             CalendarEvent {
                 id: "ev_5".to_string(),
@@ -467,6 +570,7 @@ impl CalendarStore {
                 notes: "Inspect week timeline contrast and event pill spacing.".to_string(),
                 attendees: vec!["nina@craft.design".to_string()],
                 alert_minutes_before: Some(5),
+                ..Default::default()
             },
             CalendarEvent {
                 id: "ev_6".to_string(),
@@ -481,6 +585,7 @@ impl CalendarStore {
                 notes: "Reservation under Alex.".to_string(),
                 attendees: vec!["jordan@icloud.com".to_string()],
                 alert_minutes_before: Some(30),
+                ..Default::default()
             },
             CalendarEvent {
                 id: "ev_7".to_string(),
@@ -495,6 +600,7 @@ impl CalendarStore {
                 notes: "Walk through preloaded configuration workflows.".to_string(),
                 attendees: vec!["pm@acme.dev".to_string()],
                 alert_minutes_before: Some(15),
+                ..Default::default()
             },
             CalendarEvent {
                 id: "ev_8".to_string(),
@@ -509,6 +615,68 @@ impl CalendarStore {
                 notes: "Celebrate shipping native + WASM builds.".to_string(),
                 attendees: vec!["team@acme.dev".to_string()],
                 alert_minutes_before: Some(10),
+                ..Default::default()
+            },
+            CalendarEvent {
+                id: "ev_standup".to_string(),
+                calendar_id: "cal_work".to_string(),
+                title: "Stand-up".to_string(),
+                date: week_start - Duration::days(21),
+                start_time: hm(9, 0),
+                end_time: hm(9, 15),
+                location: Some("Huddle".to_string()),
+                rrule: Some("FREQ=WEEKLY;BYDAY=MO,WE,FR".to_string()),
+                alert_minutes_before: Some(5),
+                ..Default::default()
+            },
+            CalendarEvent {
+                id: "ev_offsite".to_string(),
+                calendar_id: "cal_studio".to_string(),
+                title: "Lisbon Offsite".to_string(),
+                date: week_start + Duration::days(9),
+                end_date: Some(week_start + Duration::days(11)),
+                all_day: true,
+                location: Some("Lisbon".to_string()),
+                notes: "Workshops, design reviews and a team dinner.".to_string(),
+                ..Default::default()
+            },
+            CalendarEvent {
+                id: "ev_dentist".to_string(),
+                calendar_id: "cal_personal".to_string(),
+                title: "Dentist".to_string(),
+                date: week_start - Duration::days(5),
+                start_time: hm(16, 0),
+                end_time: hm(16, 45),
+                location: Some("Dr. Weiss".to_string()),
+                ..Default::default()
+            },
+            CalendarEvent {
+                id: "ev_party".to_string(),
+                calendar_id: "cal_family".to_string(),
+                title: "Holiday Party".to_string(),
+                date: week_start + Duration::days(26),
+                start_time: hm(19, 0),
+                end_time: hm(23, 0),
+                location: Some("Rooftop".to_string()),
+                ..Default::default()
+            },
+            CalendarEvent {
+                id: "ev_strategy".to_string(),
+                calendar_id: "cal_product".to_string(),
+                title: "Product Strategy Review".to_string(),
+                date: week_start + Duration::days(44),
+                start_time: hm(13, 0),
+                end_time: hm(15, 0),
+                ..Default::default()
+            },
+            CalendarEvent {
+                id: "ev_bday".to_string(),
+                calendar_id: "cal_family".to_string(),
+                title: "Mia’s Birthday".to_string(),
+                date: week_start + Duration::days(17),
+                all_day: true,
+                rrule: Some("FREQ=YEARLY".to_string()),
+                ..Default::default()
             },
         ];
 

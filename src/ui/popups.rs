@@ -1,0 +1,600 @@
+//! Event details in a popover beside the event, the new-event dialog (double-click a day or a
+//! time, ⌘N or ＋), Settings with accounts, and the toast.
+
+use chrono::{Duration, NaiveDate, NaiveTime};
+use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rect, RichText, Stroke, Vec2};
+
+use super::side::{icon_button, segmented};
+use super::{parse_hhmm, AccountForm, CalendarCraftApp, Inspector, NewEvent};
+use crate::i18n::{self, t};
+use crate::mcp::handle_mcp_request;
+use crate::model::{AccountKind, CalendarEvent, CalendarSource, ViewMode};
+use crate::nlp::parse_quick_entry;
+use crate::theme::{self, font, font_bold, space, text, Palette};
+
+const ALERTS: &[(Option<u32>, &str)] = &[(None, "None"), (Some(0), "At time of event"), (Some(5), "5 minutes before"), (Some(10), "10 minutes before"), (Some(15), "15 minutes before"), (Some(30), "30 minutes before"), (Some(60), "1 hour before"), (Some(1440), "1 day before")];
+const REPEATS: &[(&str, &str)] = &[("", "Never"), ("FREQ=DAILY", "Every day"), ("FREQ=WEEKLY", "Every week"), ("FREQ=MONTHLY", "Every month"), ("FREQ=YEARLY", "Every year")];
+
+/// Text fields for the editable times and dates.
+struct Texts<'a> {
+    date: &'a mut String,
+    start: &'a mut String,
+    end: &'a mut String,
+}
+
+fn field_label(ui: &mut egui::Ui, p: &Palette, label: &str) {
+    ui.label(RichText::new(label).font(font(text::T12)).color(p.text_2));
+}
+
+/// The fields of an event, shared by the popover and the dialog. Returns whether anything changed.
+fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: Texts, calendars: &[CalendarSource], editable: bool) -> bool {
+    let mut changed = false;
+    ui.add_enabled_ui(editable, |ui| {
+        egui::Grid::new(ui.id().with("fields")).num_columns(2).spacing([space::S12, space::S8]).min_col_width(70.0).show(ui, |ui| {
+            field_label(ui, p, t("Calendar"));
+            let current = calendars.iter().find(|c| c.id == ev.calendar_id).map(|c| c.name.clone()).unwrap_or_else(|| t("Choose…").into());
+            egui::ComboBox::from_id_salt(ui.id().with("cal")).selected_text(current).width(220.0).show_ui(ui, |ui| {
+                for c in calendars {
+                    let label = RichText::new(format!("●  {}", c.name)).color(theme::color_of(&c.color_hex));
+                    if ui.selectable_label(c.id == ev.calendar_id, label).clicked() {
+                        ev.calendar_id = c.id.clone();
+                        changed = true;
+                    }
+                }
+            });
+            ui.end_row();
+
+            field_label(ui, p, t("All-day"));
+            changed |= ui.checkbox(&mut ev.all_day, "").changed();
+            ui.end_row();
+
+            field_label(ui, p, t("Date"));
+            ui.horizontal(|ui| {
+                changed |= ui.add(egui::TextEdit::singleline(texts.date).desired_width(110.0).hint_text("2026-11-24")).changed();
+                if !ev.all_day {
+                    changed |= ui.add(egui::TextEdit::singleline(texts.start).desired_width(56.0).hint_text("09:00")).changed();
+                    ui.label("–");
+                    changed |= ui.add(egui::TextEdit::singleline(texts.end).desired_width(56.0).hint_text("10:00")).changed();
+                }
+            });
+            ui.end_row();
+
+            if ev.all_day {
+                field_label(ui, p, t("Until"));
+                let mut end = ev.end_date.map(|d| d.to_string()).unwrap_or_default();
+                if ui.add(egui::TextEdit::singleline(&mut end).desired_width(110.0).hint_text(t("same day"))).changed() {
+                    ev.end_date = NaiveDate::parse_from_str(end.trim(), "%Y-%m-%d").ok();
+                    changed = true;
+                }
+                ui.end_row();
+            }
+
+            field_label(ui, p, t("Location"));
+            let mut loc = ev.location.clone().unwrap_or_default();
+            if ui.add(egui::TextEdit::singleline(&mut loc).desired_width(220.0).hint_text(t("Add location"))).changed() {
+                ev.location = Some(loc).filter(|l| !l.trim().is_empty());
+                changed = true;
+            }
+            ui.end_row();
+
+            field_label(ui, p, t("Link"));
+            let mut url = ev.conference_url.clone().unwrap_or_default();
+            if ui.add(egui::TextEdit::singleline(&mut url).desired_width(220.0).hint_text("https://")).changed() {
+                ev.conference_url = Some(url).filter(|u| !u.trim().is_empty());
+                changed = true;
+            }
+            ui.end_row();
+
+            field_label(ui, p, t("Alert"));
+            let label = ALERTS.iter().find(|(m, _)| *m == ev.alert_minutes_before).map(|(_, l)| t(l).to_string()).unwrap_or_else(|| format!("{} min", ev.alert_minutes_before.unwrap_or(0)));
+            egui::ComboBox::from_id_salt(ui.id().with("alert")).selected_text(label).width(220.0).show_ui(ui, |ui| {
+                for (m, l) in ALERTS {
+                    if ui.selectable_label(ev.alert_minutes_before == *m, t(l)).clicked() {
+                        ev.alert_minutes_before = *m;
+                        changed = true;
+                    }
+                }
+            });
+            ui.end_row();
+
+            field_label(ui, p, t("Repeat"));
+            let rule = ev.rrule.clone().unwrap_or_default();
+            let known = REPEATS.iter().find(|(r, _)| *r == rule);
+            let label = known.map(|(_, l)| t(l).to_string()).unwrap_or_else(|| t("Custom").to_string());
+            egui::ComboBox::from_id_salt(ui.id().with("repeat")).selected_text(label).width(220.0).show_ui(ui, |ui| {
+                for (r, l) in REPEATS {
+                    if ui.selectable_label(rule == *r, t(l)).clicked() {
+                        ev.rrule = Some(r.to_string()).filter(|r| !r.is_empty());
+                        changed = true;
+                    }
+                }
+            });
+            ui.end_row();
+        });
+        field_label(ui, p, t("Notes"));
+        changed |= ui.add(egui::TextEdit::multiline(&mut ev.notes).desired_rows(3).desired_width(f32::INFINITY).hint_text(t("Add notes"))).changed();
+    });
+    changed
+}
+
+/// Apply the date and time texts; an error names the field.
+fn apply_texts(ev: &mut CalendarEvent, date: &str, start: &str, end: &str) -> Result<(), String> {
+    ev.date = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").map_err(|_| t("The date should look like 2026-11-24").to_string())?;
+    if ev.all_day {
+        ev.start_time = None;
+        ev.end_time = None;
+    } else {
+        let s = parse_hhmm(start).ok_or_else(|| t("The start time should look like 09:30").to_string())?;
+        let e = if end.trim().is_empty() { s + Duration::hours(1) } else { parse_hhmm(end).ok_or_else(|| t("The end time should look like 10:30").to_string())? };
+        ev.start_time = Some(s);
+        ev.end_time = Some(e);
+        if e <= s && ev.end_date.is_none() {
+            return Err(t("The event ends before it starts").to_string());
+        }
+    }
+    Ok(())
+}
+
+impl CalendarCraftApp {
+    pub fn open_inspector(&mut self, id: &str, anchor: Option<Rect>) {
+        let Some(ev) = self.store.events.iter().find(|e| e.id == id).cloned() else { return };
+        self.new_event = None;
+        self.inspector = Some(Inspector {
+            event_id: id.to_string(),
+            anchor,
+            date_text: ev.date.to_string(),
+            start_text: ev.start_time.map(|t| t.format("%H:%M").to_string()).unwrap_or_default(),
+            end_text: ev.end_time.map(|t| t.format("%H:%M").to_string()).unwrap_or_default(),
+            draft: ev,
+            confirm_delete: false,
+        });
+    }
+
+    pub fn open_new_event(&mut self, day: NaiveDate, at: Option<NaiveTime>) {
+        self.inspector = None;
+        let cal = self.default_calendar().unwrap_or_default();
+        let start = at.unwrap_or_else(|| NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+        let draft = CalendarEvent {
+            id: self.store.next_id("ev"),
+            calendar_id: cal,
+            title: String::new(),
+            date: day,
+            start_time: Some(start),
+            end_time: Some(start + Duration::hours(1)),
+            alert_minutes_before: Some(10),
+            ..Default::default()
+        };
+        self.new_event = Some(NewEvent {
+            sentence: String::new(),
+            date_text: day.to_string(),
+            start_text: start.format("%H:%M").to_string(),
+            end_text: (start + Duration::hours(1)).format("%H:%M").to_string(),
+            draft,
+            focus_done: false,
+        });
+    }
+
+    pub(super) fn popups(&mut self, ctx: &egui::Context) {
+        let p = *self.palette();
+        self.inspector_popover(ctx, &p);
+        self.new_event_dialog(ctx, &p);
+        self.settings_dialog(ctx, &p);
+        if let Some((msg, error)) = self.banner.clone() {
+            egui::Area::new("toast".into()).order(egui::Order::Tooltip).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -24.0)).show(ctx, |ui| {
+                egui::Frame::new().fill(if error { p.danger } else { p.text }).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::symmetric(16, 10)).shadow(ctx.style().visuals.popup_shadow).show(ui, |ui| {
+                    ui.label(RichText::new(msg).color(if error { Color32::WHITE } else { p.surface }));
+                });
+            });
+        }
+    }
+
+    fn inspector_popover(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some(mut ins) = self.inspector.take() else { return };
+        let screen = ctx.screen_rect();
+        let mobile = self.is_mobile(ctx);
+        let width = if mobile { screen.width() } else { 360.0 };
+        let editable = self.calendar_writable(&ins.draft.calendar_id) && !ins.draft.locked;
+        let calendars: Vec<CalendarSource> = if editable { self.writable_calendars() } else { self.store.calendars.clone() };
+        let pos = match (mobile, ins.anchor) {
+            (true, _) => Pos2::new(0.0, screen.bottom() - 560.0_f32.min(screen.height() * 0.85)),
+            (false, Some(a)) => {
+                let right = a.right() + 10.0;
+                let x = if right + width < screen.right() - 8.0 { right } else { (a.left() - width - 10.0).max(8.0) };
+                Pos2::new(x, (a.top() - 40.0).clamp(8.0, (screen.bottom() - 560.0).max(8.0)))
+            }
+            (false, None) => Pos2::new(screen.center().x - width / 2.0, screen.top() + 90.0),
+        };
+        let color = self.cal_color(&ins.draft.calendar_id);
+        let mut close = false;
+        let mut save = false;
+        let mut delete = false;
+        let mut error: Option<String> = None;
+        let area = egui::Area::new("inspector".into()).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+            let corner = if mobile { CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 } } else { CornerRadius::same(16) };
+            egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.line)).corner_radius(corner).shadow(ctx.style().visuals.window_shadow).inner_margin(egui::Margin::same(20)).show(ui, |ui| {
+                ui.set_width(width - 40.0);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(12.0, 28.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 6.0, color);
+                    ui.add_enabled(editable, egui::TextEdit::singleline(&mut ins.draft.title).font(font_bold(text::T18)).frame(false).desired_width(width - 100.0).hint_text(t("Title")));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icon_button(ui, p, "✕", t("Close")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.label(RichText::new(describe_when(&ins.draft)).font(font(text::T14)).color(p.text_2));
+                if !editable {
+                    let why = if ins.draft.locked { t("Part of a repeating series with changes; edit it in the app that made it.") } else { t("This calendar is read only.") };
+                    ui.label(RichText::new(format!("🔒 {why}")).font(font(text::T12)).color(p.text_2));
+                }
+                ui.add_space(space::S8);
+                let Inspector { draft, date_text, start_text, end_text, .. } = &mut ins;
+                event_fields(ui, p, draft, Texts { date: date_text, start: start_text, end: end_text }, &calendars, editable);
+                ui.add_space(space::S12);
+                ui.horizontal(|ui| {
+                    if editable {
+                        if ins.confirm_delete {
+                            if ui.add(egui::Button::new(RichText::new(t("Delete event")).color(Color32::WHITE)).fill(p.danger)).clicked() {
+                                delete = true;
+                            }
+                            if ui.button(t("Keep")).clicked() {
+                                ins.confirm_delete = false;
+                            }
+                        } else if ui.add(egui::Button::new(RichText::new(t("Delete")).color(p.danger)).fill(Color32::TRANSPARENT)).clicked() {
+                            ins.confirm_delete = true;
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if editable {
+                            if theme::primary_button(ui, p, t("Save")).clicked() {
+                                save = true;
+                            }
+                            if ui.button(t("Cancel")).clicked() {
+                                close = true;
+                            }
+                        } else if ui.button(t("Close")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        });
+        // A click elsewhere closes it (not the click that opened it).
+        let outside = ctx.input(|i| i.pointer.any_pressed()) && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|pt| !area.response.rect.contains(pt)) && ins.anchor.is_none_or(|a| !a.contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default()));
+        if save {
+            let mut ev = ins.draft.clone();
+            match apply_texts(&mut ev, &ins.date_text, &ins.start_text, &ins.end_text) {
+                Ok(()) => {
+                    let title = ev.title.clone();
+                    self.commit_event(ev);
+                    self.flash(format!("{} \"{title}\"", t("Saved")), false);
+                    return;
+                }
+                Err(e) => error = Some(e),
+            }
+        }
+        if delete {
+            self.delete_event(&ins.event_id);
+            return;
+        }
+        if let Some(e) = error {
+            self.flash(e, true);
+        }
+        if close || (outside && !self.is_mobile(ctx)) {
+            return;
+        }
+        if self.inspector.is_none() {
+            self.inspector = Some(ins);
+        }
+    }
+
+    fn new_event_dialog(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some(mut ne) = self.new_event.take() else { return };
+        let calendars = self.writable_calendars();
+        let mut add = false;
+        let mut cancel = false;
+        let mobile = self.is_mobile(ctx);
+        let width = if mobile { ctx.screen_rect().width() - 24.0 } else { 440.0 };
+        let modal = egui::Modal::new("new_event".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
+            ui.set_width(width - 48.0);
+            ui.label(RichText::new(t("New event")).font(font_bold(text::T18)));
+            ui.add_space(space::S4);
+            let r = ui.add(egui::TextEdit::singleline(&mut ne.sentence).hint_text(t("Type it: Dinner with Ada friday 7pm at Osteria")).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(12, 9)));
+            if !ne.focus_done {
+                r.request_focus();
+                ne.focus_done = true;
+            }
+            if r.changed() {
+                let anchor = NaiveDate::parse_from_str(&ne.date_text, "%Y-%m-%d").unwrap_or(self.selected_date);
+                if let Some(parsed) = parse_quick_entry(&ne.sentence, anchor, &self.store.calendars, &ne.draft.calendar_id) {
+                    ne.draft.title = parsed.title.clone();
+                    ne.draft.all_day = parsed.all_day;
+                    ne.draft.location = parsed.location.clone();
+                    if let Some(c) = parsed.calendar_id.clone().filter(|c| calendars.iter().any(|x| &x.id == c)) {
+                        ne.draft.calendar_id = c;
+                    }
+                    ne.date_text = parsed.date.to_string();
+                    if let Some(s) = parsed.start_time {
+                        ne.start_text = s.format("%H:%M").to_string();
+                        ne.end_text = parsed.end_time.unwrap_or(s + Duration::hours(1)).format("%H:%M").to_string();
+                    }
+                    if parsed.alert_minutes_before.is_some() {
+                        ne.draft.alert_minutes_before = parsed.alert_minutes_before;
+                    }
+                }
+            }
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !ne.draft.title.trim().is_empty() {
+                add = true;
+            }
+            ui.add_space(space::S8);
+            ui.add(egui::TextEdit::singleline(&mut ne.draft.title).font(font_bold(text::T16)).hint_text(t("Title")).desired_width(f32::INFINITY));
+            ui.add_space(space::S4);
+            if calendars.is_empty() {
+                ui.label(RichText::new(t("There is no calendar to add to. Add an account or a calendar in Settings.")).color(p.danger));
+            }
+            let NewEvent { draft, date_text, start_text, end_text, .. } = &mut ne;
+            event_fields(ui, p, draft, Texts { date: date_text, start: start_text, end: end_text }, &calendars, true);
+            ui.add_space(space::S12);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if theme::primary_button(ui, p, t("Add")).clicked() {
+                    add = true;
+                }
+                if ui.button(t("Cancel")).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if modal.should_close() {
+            cancel = true;
+        }
+        if add {
+            let mut ev = ne.draft.clone();
+            if ev.title.trim().is_empty() {
+                ev.title = t("New event").into();
+            }
+            if ev.calendar_id.is_empty() || !calendars.iter().any(|c| c.id == ev.calendar_id) {
+                self.flash(t("Choose a calendar first"), true);
+                self.new_event = Some(ne);
+                return;
+            }
+            match apply_texts(&mut ev, &ne.date_text, &ne.start_text, &ne.end_text) {
+                Ok(()) => {
+                    let (day, title) = (ev.date, ev.title.clone());
+                    self.commit_event(ev);
+                    self.select_date(day);
+                    self.flash(format!("{} \"{title}\"", t("Added")), false);
+                    return;
+                }
+                Err(e) => self.flash(e, true),
+            }
+        }
+        if !cancel {
+            self.new_event = Some(ne);
+        }
+    }
+
+    fn settings_dialog(&mut self, ctx: &egui::Context, p: &Palette) {
+        if !self.settings_open {
+            return;
+        }
+        let width = (ctx.screen_rect().width() - 24.0).min(620.0);
+        let modal = egui::Modal::new("settings".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
+            ui.set_width(width - 48.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t("Settings")).font(font_bold(text::T18)));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, p, "✕", t("Close")).clicked() {
+                        self.settings_open = false;
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                for (i, label) in [t("General"), t("Accounts"), "MCP"].iter().enumerate() {
+                    let on = self.settings_tab == i as u8;
+                    let b = egui::Button::new(RichText::new(*label).font(if on { font_bold(text::T14) } else { font(text::T14) }).color(if on { p.primary_strong } else { p.text_2 })).fill(if on { p.primary_faint } else { Color32::TRANSPARENT });
+                    if ui.add(b).clicked() {
+                        self.settings_tab = i as u8;
+                    }
+                }
+            });
+            ui.add_space(space::S8);
+            egui::ScrollArea::vertical().max_height(ctx.screen_rect().height() * 0.7).show(ui, |ui| match self.settings_tab {
+                0 => self.settings_general(ui, p),
+                1 => self.settings_accounts(ui, p),
+                _ => self.settings_mcp(ui, p),
+            });
+        });
+        if modal.should_close() {
+            self.settings_open = false;
+        }
+    }
+
+    fn settings_general(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        egui::Grid::new("general").num_columns(2).spacing([space::S16, space::S12]).show(ui, |ui| {
+            field_label(ui, p, t("Appearance"));
+            ui.horizontal(|ui| {
+                for (value, label) in [("system", t("System")), ("light", t("Light")), ("dark", t("Dark"))] {
+                    if ui.selectable_label(self.prefs.theme == value, label).clicked() {
+                        self.prefs.theme = value.into();
+                        self.mark_changed();
+                    }
+                }
+            });
+            ui.end_row();
+            field_label(ui, p, t("Language"));
+            let current = if self.prefs.language == "auto" { t("Automatic").to_string() } else { i18n::language_name(&self.prefs.language).to_string() };
+            egui::ComboBox::from_id_salt("lang").selected_text(current).width(200.0).show_ui(ui, |ui| {
+                if ui.selectable_label(self.prefs.language == "auto", t("Automatic")).clicked() {
+                    self.prefs.language = "auto".into();
+                    self.mark_changed();
+                }
+                for (code, name) in i18n::LANGUAGES {
+                    if ui.selectable_label(self.prefs.language == *code, *name).clicked() {
+                        self.prefs.language = (*code).into();
+                        self.mark_changed();
+                    }
+                }
+            });
+            ui.end_row();
+            field_label(ui, p, t("Animations"));
+            ui.horizontal(|ui| {
+                for (value, label) in [("system", t("System")), ("on", t("On")), ("off", t("Off"))] {
+                    if ui.selectable_label(self.prefs.animations == value, label).clicked() {
+                        self.prefs.animations = value.into();
+                        self.mark_changed();
+                    }
+                }
+            });
+            ui.end_row();
+            field_label(ui, p, t("Default view"));
+            let mut v = self.prefs.view;
+            if segmented(ui, p, &mut v, &[ViewMode::Day, ViewMode::Week, ViewMode::Month, ViewMode::Quarter, ViewMode::Year]) {
+                self.set_view(v);
+            }
+            ui.end_row();
+            field_label(ui, p, t("Day starts at"));
+            egui::ComboBox::from_id_salt("daystart").selected_text(format!("{:02}:00", self.prefs.day_start)).show_ui(ui, |ui| {
+                for h in 0..=12u8 {
+                    if ui.selectable_label(self.prefs.day_start == h, format!("{h:02}:00")).clicked() {
+                        self.prefs.day_start = h;
+                        self.timeline_scrolled = false;
+                        self.mark_changed();
+                    }
+                }
+            });
+            ui.end_row();
+            field_label(ui, p, t("New events go to"));
+            let cals = self.writable_calendars();
+            let current = self.default_calendar().and_then(|id| cals.iter().find(|c| c.id == id).map(|c| c.name.clone())).unwrap_or_else(|| t("Choose…").into());
+            egui::ComboBox::from_id_salt("defcal").selected_text(current).width(200.0).show_ui(ui, |ui| {
+                for c in &cals {
+                    if ui.selectable_label(self.store.settings.default_calendar_id == c.id, &c.name).clicked() {
+                        self.store.settings.default_calendar_id = c.id.clone();
+                        self.mark_changed();
+                    }
+                }
+            });
+            ui.end_row();
+        });
+    }
+
+    fn settings_accounts(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        for acc in self.store.accounts.clone() {
+            egui::Frame::new().fill(p.hover).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&acc.name).font(font_bold(text::T14)));
+                        let kind = match acc.kind {
+                            AccountKind::Caldav if acc.host_managed => t("CalDAV · provided by artcraftCloud"),
+                            AccountKind::Caldav => "CalDAV",
+                            AccountKind::Ics => t("Subscription (read only)"),
+                            AccountKind::File => t("Opened file"),
+                            AccountKind::Local => t("On this device"),
+                        };
+                        let detail = [kind.to_string(), acc.email.clone(), acc.server_url.clone().unwrap_or_default()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+                        ui.label(RichText::new(detail).font(font(text::T12)).color(p.text_2));
+                        if let Some(err) = self.status.get(&acc.id) {
+                            ui.label(RichText::new(err).font(font(text::T12)).color(p.danger));
+                        }
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if !acc.host_managed && acc.kind != AccountKind::File && ui.add(egui::Button::new(RichText::new(t("Remove")).color(p.danger))).clicked() {
+                            self.remove_account(&acc.id);
+                        }
+                        if matches!(acc.kind, AccountKind::Caldav | AccountKind::Ics) && ui.button(t("Refresh")).clicked() {
+                            self.refresh_account(&acc.id);
+                        }
+                    });
+                });
+            });
+        }
+        ui.add_space(space::S12);
+        ui.label(RichText::new(t("Add an account")).font(font_bold(text::T16)));
+        let f = &mut self.account_form;
+        ui.horizontal(|ui| {
+            if ui.selectable_label(!f.kind_ics, t("CalDAV account")).clicked() {
+                f.kind_ics = false;
+            }
+            if ui.selectable_label(f.kind_ics, t("Subscription (.ics)")).clicked() {
+                f.kind_ics = true;
+            }
+        });
+        egui::Grid::new("addacc").num_columns(2).spacing([space::S12, space::S8]).show(ui, |ui| {
+            field_label(ui, p, t("Name"));
+            ui.add(egui::TextEdit::singleline(&mut f.name).hint_text(t("Work")).desired_width(300.0));
+            ui.end_row();
+            field_label(ui, p, t("Address"));
+            ui.add(egui::TextEdit::singleline(&mut f.url).hint_text(if f.kind_ics { "https://…/calendar.ics" } else { "https://caldav.icloud.com" }).desired_width(300.0));
+            ui.end_row();
+            if !f.kind_ics {
+                field_label(ui, p, t("User name"));
+                ui.add(egui::TextEdit::singleline(&mut f.username).hint_text("ada@example.org").desired_width(300.0));
+                ui.end_row();
+                field_label(ui, p, t("Password"));
+                ui.add(egui::TextEdit::singleline(&mut f.password).password(true).hint_text(t("App password")).desired_width(300.0));
+                ui.end_row();
+            }
+        });
+        if let Some(err) = &f.error {
+            ui.label(RichText::new(err).color(p.danger));
+        }
+        let connect = theme::primary_button(ui, p, t("Connect")).clicked();
+        ui.label(RichText::new(t("iCloud: https://caldav.icloud.com with an app-specific password. Fastmail: https://caldav.fastmail.com. Nextcloud: https://<server>/remote.php/dav. Google needs a sign-in CalendarCraft cannot do yet: add its secret iCal address as a subscription instead.")).font(font(text::T12)).color(p.text_2));
+        if cfg!(target_arch = "wasm32") && self.host.remote_proxy.is_none() {
+            ui.label(RichText::new(t("In a plain browser page most servers refuse to answer (CORS). Inside artcraftCloud the requests go through its proxy.")).font(font(text::T12)).color(p.text_2));
+        }
+        if connect {
+            self.add_account_from_form();
+        }
+        ui.add_space(space::S12);
+        ui.label(RichText::new(t("Calendar on this device")).font(font_bold(text::T16)));
+        ui.horizontal(|ui| {
+            let id = ui.id().with("localname");
+            let mut name: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
+            ui.add(egui::TextEdit::singleline(&mut name).hint_text(t("Personal")).desired_width(220.0));
+            if ui.button(t("Create")).clicked() && !name.trim().is_empty() {
+                self.add_local_calendar(name.trim());
+                name.clear();
+            }
+            ui.data_mut(|d| d.insert_temp(id, name));
+        });
+        let _ = AccountForm::default;
+    }
+
+    fn settings_mcp(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.label(t("Connect an MCP client over stdio:"));
+        ui.code("calendarcraft-mcp --config calendarcraft.config.json");
+        ui.add_space(space::S8);
+        ui.label(RichText::new(t("Try a request against this calendar:")).color(p.text_2));
+        ui.add(egui::TextEdit::multiline(&mut self.mcp_request).code_editor().desired_rows(7).desired_width(f32::INFINITY));
+        if theme::primary_button(ui, p, t("Run")).clicked() {
+            self.mcp_response = match serde_json::from_str::<serde_json::Value>(&self.mcp_request) {
+                Ok(v) => handle_mcp_request(&mut self.store, &v).map(|r| serde_json::to_string_pretty(&r).unwrap_or_default()).unwrap_or_else(|| "(notification)".into()),
+                Err(e) => format!("JSON: {e}"),
+            };
+            self.mark_changed();
+        }
+        if !self.mcp_response.is_empty() {
+            ui.add(egui::TextEdit::multiline(&mut self.mcp_response).code_editor().desired_rows(7).desired_width(f32::INFINITY));
+        }
+    }
+}
+
+fn describe_when(ev: &CalendarEvent) -> String {
+    use chrono::Datelike;
+    let day = format!("{}, {} {} {}", i18n::weekday_name(ev.date.weekday()), ev.date.day(), i18n::month_name(ev.date.month()), ev.date.year());
+    let mut out = match (ev.all_day, ev.start_time, ev.end_time) {
+        (false, Some(s), Some(e)) => format!("{day} · {} – {}", s.format("%H:%M"), e.format("%H:%M")),
+        (false, Some(s), None) => format!("{day} · {}", s.format("%H:%M")),
+        _ => format!("{day} · {}", t("all-day")),
+    };
+    if let Some(end) = ev.end_date.filter(|e| *e > ev.date) {
+        out.push_str(&format!(" → {} {}", end.day(), i18n::month_short(end.month())));
+    }
+    if ev.rrule.is_some() {
+        out.push_str(&format!(" · ↻ {}", t("repeats")));
+    }
+    out
+}

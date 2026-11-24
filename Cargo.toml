@@ -1,12 +1,12 @@
 [package]
 name = "calendarcraft"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Clean-room calendar app in Rust for macOS, WebAssembly, and MCP"
 
 [lib]
 name = "calendarcraft"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 path = "src/lib.rs"
 
 [[bin]]
@@ -23,14 +23,25 @@ egui = "0.31"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+quick-xml = "0.37"
+base64 = "0.22"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4.5", features = ["derive"] }
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
+ureq = "2.12"
+pollster = "0.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 getrandom = { version = "0.3", features = ["wasm_js"] }
-web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Location", "Storage"] }
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Location", "Storage", "Request", "RequestInit", "RequestCredentials", "RequestRedirect", "Response", "Headers", "MessageEvent", "UrlSearchParams", "Navigator", "MediaQueryList"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

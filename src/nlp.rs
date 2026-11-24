@@ -288,6 +288,7 @@ impl ParsedQuickEntry {
             notes: String::new(),
             attendees: Vec::new(),
             alert_minutes_before: self.alert_minutes_before,
+            ..Default::default()
         }
     }
 }

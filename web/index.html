@@ -2,32 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CalendarCraft — SnowUI WebAssembly Edition</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <title>CalendarCraft</title>
+  <link data-trunk rel="rust" href="../Cargo.toml" data-bin="calendarcraft" data-wasm-opt="z" />
   <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      background: #0f172a;
-      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
-    }
-    #calendarcraft_canvas {
-      width: 100vw;
-      height: 100vh;
-      display: block;
-    }
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #ffffff; }
+    @media (prefers-color-scheme: dark) { html, body { background: #262626; } }
+    #calendarcraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; }
+    #loading { position: absolute; inset: 0; display: grid; place-items: center; font: 14px/20px -apple-system, "Inter", system-ui, sans-serif; color: #00000066; }
   </style>
 </head>
 <body>
+  <!-- Hosts frame this page with ?host=parent and speak the craft-web-host bridge
+       (calendarcraft:ready / :open / :save / :dirty). A host may set window.calendarcraftHost
+       ({ accounts: [{ id, name, email, url }], remoteProxy }) before the app starts. -->
   <canvas id="calendarcraft_canvas"></canvas>
-  <script type="module">
-    // Optional: preload accounts/configuration into localStorage before starting WASM
-    // localStorage.setItem("calendarcraft_config", JSON.stringify(customConfig));
-    import init from "./pkg/calendarcraft.js";
-    init();
-  </script>
+  <div id="loading">CalendarCraft…</div>
 </body>
 </html>
