@@ -1,0 +1,15 @@
+/target
+/dist
+/web/pkg
+# Craft Anything working state (kept in the folder, not in the repo)
+/transcript.json
+/feed.json
+/usage.json
+/build-activity.log
+/craft.json
+/inbox/
+/checks/
+/pinned/
+/investigation.cany/
+/shots/
+/reference/
