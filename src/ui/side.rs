@@ -136,7 +136,12 @@ impl CalendarCraftApp {
         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if !self.quick_input.trim().is_empty() {
             let cal = self.default_calendar().unwrap_or_default();
-            if let Some(parsed) = parse_quick_entry(&self.quick_input, self.selected_date, &self.store.calendars, &cal) {
+            if let Some(parsed) = parse_quick_entry(&self.quick_input, super::today(), &self.store.calendars, &cal).map(|mut q| {
+                if !q.date_given {
+                    q.date = self.selected_date;
+                }
+                q
+            }) {
                 let when = match (parsed.all_day, parsed.start_time) {
                     (false, Some(s)) => format!("{} {}, {}", i18n::weekday_short(parsed.date.weekday()), parsed.date.format("%-d.%-m."), s.format("%H:%M")),
                     _ => format!("{} {}", i18n::weekday_short(parsed.date.weekday()), parsed.date.format("%-d.%-m.")),

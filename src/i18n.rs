@@ -132,6 +132,7 @@ static TABLE: &[[&str; 6]] = &[
     ["continues", "geht weiter", "continúa", "suite", "continua", "continua"],
     ["more", "weitere", "más", "de plus", "altri", "mais"],
     ["events", "Termine", "eventos", "événements", "eventi", "eventos"],
+    ["event", "Termin", "evento", "événement", "evento", "evento"],
     ["Added", "Hinzugefügt", "Añadido", "Ajouté", "Aggiunto", "Adicionado"],
     ["Saved", "Gesichert", "Guardado", "Enregistré", "Salvato", "Salvo"],
     ["Deleted", "Gelöscht", "Eliminado", "Supprimé", "Eliminato", "Excluído"],

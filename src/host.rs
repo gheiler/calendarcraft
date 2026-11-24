@@ -51,8 +51,9 @@ pub struct HostUser {
 pub enum HostMsg {
     /// `calendarcraft:open`: a document to show.
     Open { name: String, bytes: Vec<u8> },
-    /// `window.calendarcraft.execute(command)`, e.g. `file.save` for the host's autosave.
-    Command(String),
+    /// `window.calendarcraft.execute(command, args)`, e.g. `file.save` for the host's autosave,
+    /// or `calendar.subscribe` with `{ url, name }`.
+    Command(String, serde_json::Value),
 }
 
 pub type HostInbox = Arc<Mutex<Vec<HostMsg>>>;
@@ -223,19 +224,39 @@ mod bridge {
 
         // Page API: window.calendarcraft.execute("file.save") (the host's autosave uses it).
         let api = js_sys::Object::new();
-        let execute = Closure::wrap(Box::new(move |command: JsValue| -> JsValue {
+        let execute = Closure::wrap(Box::new(move |command: JsValue, args: JsValue| -> JsValue {
             let Some(cmd) = command.as_string() else { return JsValue::FALSE };
+            let args = if args.is_object() {
+                js_sys::JSON::stringify(&args).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+            } else {
+                serde_json::Value::Null
+            };
             if let Ok(mut q) = inbox.lock() {
-                q.push(HostMsg::Command(cmd));
+                q.push(HostMsg::Command(cmd, args));
             }
             wake();
             JsValue::TRUE
-        }) as Box<dyn FnMut(JsValue) -> JsValue>);
+        }) as Box<dyn FnMut(JsValue, JsValue) -> JsValue>);
         let _ = js_sys::Reflect::set(&api, &"execute".into(), execute.as_ref());
         let _ = js_sys::Reflect::set(&api, &"version".into(), &env!("CARGO_PKG_VERSION").into());
         execute.forget();
         let _ = js_sys::Reflect::set(&window, &"calendarcraft".into(), &api);
     }
+}
+
+/// What the app shows, as JSON in `window.calendarcraft.state`, for hosts, agents and tests.
+pub fn publish_state(json: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(window) = web_sys::window() else { return };
+        if let Ok(api) = js_sys::Reflect::get(&window, &"calendarcraft".into()) {
+            if api.is_object() {
+                let _ = js_sys::Reflect::set(&api, &"state".into(), &json.into());
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = json;
 }
 
 /// Listen for the host's messages and tell it the app is ready.

@@ -207,7 +207,7 @@ pub fn resolve(base: &str, href: &str) -> String {
 pub fn normalize_color(color: &str) -> Option<String> {
     let c = color.trim();
     let hex = c.strip_prefix('#')?;
-    (hex.len() >= 6 && hex[..6].chars().all(|x| x.is_ascii_hexdigit())).then(|| format!("#{}", &hex[..6].to_ascii_uppercase()))
+    (hex.len() >= 6 && hex[..6].chars().all(|x| x.is_ascii_hexdigit())).then(|| format!("#{}", hex[..6].to_ascii_uppercase()))
 }
 
 #[cfg(test)]

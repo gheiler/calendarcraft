@@ -1,5 +1,6 @@
 /target
 /dist
+/dist-release
 /web/pkg
 # Craft Anything working state (kept in the folder, not in the repo)
 /transcript.json

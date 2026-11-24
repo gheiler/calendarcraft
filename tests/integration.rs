@@ -85,3 +85,15 @@ fn test_mcp_protocol_and_config_preload() {
     let reloaded = CalendarStore::from_json_str(&exported).expect("deserialize config");
     assert_eq!(reloaded.accounts.len(), store.accounts.len());
 }
+
+#[test]
+fn quick_entry_says_whether_it_named_a_day() {
+    let anchor = chrono::NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+    let store = calendarcraft::CalendarStore::sample_preloaded(anchor);
+    let named = parse_quick_entry("Lunch tomorrow 1pm", anchor, &store.calendars, "cal_work").unwrap();
+    assert!(named.date_given);
+    assert_eq!(named.date, anchor.succ_opt().unwrap());
+    let plain = parse_quick_entry("Planning 49327 3pm", anchor, &store.calendars, "cal_work").unwrap();
+    assert!(!plain.date_given, "a number in the title is not a day");
+    assert_eq!(plain.date, anchor);
+}

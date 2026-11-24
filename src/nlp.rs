@@ -12,6 +12,8 @@ pub struct ParsedQuickEntry {
     pub calendar_id: Option<String>,
     pub alert_minutes_before: Option<u32>,
     pub is_task: bool,
+    /// The sentence named a day (today, tomorrow, friday, a date…); otherwise `date` is the anchor.
+    pub date_given: bool,
 }
 
 /// Clean-room natural-language quick-entry parser inspired by calendar sentence input.
@@ -103,6 +105,7 @@ pub fn parse_quick_entry(
 
     // Extract date and time tokens
     let mut resolved_date = anchor_date;
+    let mut date_given = false;
     let mut start_time: Option<NaiveTime> = None;
     let mut end_time: Option<NaiveTime> = None;
     let mut all_day = false;
@@ -126,11 +129,13 @@ pub fn parse_quick_entry(
 
         // "today", "tomorrow", "tmrw"
         if low == "today" || low == "tod" {
+            date_given = true;
             resolved_date = anchor_date;
             i += 1;
             continue;
         }
         if low == "tomorrow" || low == "tmrw" || low == "tom" {
+            date_given = true;
             resolved_date = anchor_date + Duration::days(1);
             i += 1;
             continue;
@@ -141,10 +146,12 @@ pub fn parse_quick_entry(
             if let Ok(n) = tokens[i + 1].parse::<i64>() {
                 let unit = tokens[i + 2].to_lowercase();
                 if unit.starts_with("day") {
+                    date_given = true;
                     resolved_date = anchor_date + Duration::days(n);
                     i += 3;
                     continue;
                 } else if unit.starts_with("week") {
+                    date_given = true;
                     resolved_date = anchor_date + Duration::days(n * 7);
                     i += 3;
                     continue;
@@ -155,12 +162,14 @@ pub fn parse_quick_entry(
         // "next <weekday>" or "on <weekday>"
         if (low == "next" || low == "on") && i + 1 < tokens.len() {
             if let Some(wd) = parse_weekday(&tokens[i + 1]) {
+                date_given = true;
                 resolved_date = anchor_date.next_weekday_occurrence(wd, low == "next");
                 i += 2;
                 continue;
             }
             if low == "on" {
                 if let Ok(d) = NaiveDate::parse_from_str(&tokens[i + 1], "%Y-%m-%d") {
+                    date_given = true;
                     resolved_date = d;
                     i += 2;
                     continue;
@@ -170,6 +179,7 @@ pub fn parse_quick_entry(
 
         // Direct ISO date YYYY-MM-DD
         if let Ok(d) = NaiveDate::parse_from_str(&low, "%Y-%m-%d") {
+            date_given = true;
             resolved_date = d;
             i += 1;
             continue;
@@ -177,6 +187,7 @@ pub fn parse_quick_entry(
 
         // Direct weekday
         if let Some(wd) = parse_weekday(&low) {
+            date_given = true;
             resolved_date = anchor_date.next_weekday_occurrence(wd, false);
             i += 1;
             continue;
@@ -261,6 +272,7 @@ pub fn parse_quick_entry(
     }
 
     Some(ParsedQuickEntry {
+        date_given,
         title,
         date: resolved_date,
         start_time,

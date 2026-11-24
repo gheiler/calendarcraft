@@ -5,7 +5,7 @@ use chrono::{Duration, NaiveDate, NaiveTime};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rect, RichText, Stroke, Vec2};
 
 use super::side::{icon_button, segmented};
-use super::{parse_hhmm, AccountForm, CalendarCraftApp, Inspector, NewEvent};
+use super::{parse_hhmm, today, AccountForm, CalendarCraftApp, Inspector, NewEvent};
 use crate::i18n::{self, t};
 use crate::mcp::handle_mcp_request;
 use crate::model::{AccountKind, CalendarEvent, CalendarSource, ViewMode};
@@ -166,6 +166,7 @@ impl CalendarCraftApp {
         };
         self.new_event = Some(NewEvent {
             sentence: String::new(),
+            day,
             date_text: day.to_string(),
             start_text: start.format("%H:%M").to_string(),
             end_text: (start + Duration::hours(1)).format("%H:%M").to_string(),
@@ -306,15 +307,15 @@ impl CalendarCraftApp {
                 ne.focus_done = true;
             }
             if r.changed() {
-                let anchor = NaiveDate::parse_from_str(&ne.date_text, "%Y-%m-%d").unwrap_or(self.selected_date);
-                if let Some(parsed) = parse_quick_entry(&ne.sentence, anchor, &self.store.calendars, &ne.draft.calendar_id) {
+                // "tomorrow", "friday"… count from today; without one the event stays on its day.
+                if let Some(parsed) = parse_quick_entry(&ne.sentence, today(), &self.store.calendars, &ne.draft.calendar_id) {
                     ne.draft.title = parsed.title.clone();
                     ne.draft.all_day = parsed.all_day;
                     ne.draft.location = parsed.location.clone();
                     if let Some(c) = parsed.calendar_id.clone().filter(|c| calendars.iter().any(|x| &x.id == c)) {
                         ne.draft.calendar_id = c;
                     }
-                    ne.date_text = parsed.date.to_string();
+                    ne.date_text = if parsed.date_given { parsed.date } else { ne.day }.to_string();
                     if let Some(s) = parsed.start_time {
                         ne.start_text = s.format("%H:%M").to_string();
                         ne.end_text = parsed.end_time.unwrap_or(s + Duration::hours(1)).format("%H:%M").to_string();

@@ -85,6 +85,8 @@ pub struct Inspector {
 #[derive(Debug, Clone)]
 pub struct NewEvent {
     pub sentence: String,
+    /// The day the dialog was opened for: the event's day unless the sentence names one.
+    pub day: NaiveDate,
     pub draft: CalendarEvent,
     pub date_text: String,
     pub start_text: String,
@@ -153,6 +155,7 @@ pub struct CalendarCraftApp {
     frame: u32,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     shot_requested: bool,
+    published: u64,
 }
 
 pub fn today() -> NaiveDate {
@@ -238,6 +241,7 @@ impl CalendarCraftApp {
             now: 0.0,
             frame: 0,
             shot_requested: false,
+            published: 0,
             launch,
         };
         app.adopt_host_accounts();
@@ -719,7 +723,7 @@ impl CalendarCraftApp {
                 if let Some(day) = first {
                     self.select_date(day);
                 }
-                self.flash(format!("{name}: {count} {}", t("events")), false);
+                self.flash(format!("{name}: {count} {}", t(if count == 1 { "event" } else { "events" })), false);
             }
             Err(err) => {
                 host::post_failed(&err);
@@ -744,10 +748,19 @@ impl CalendarCraftApp {
     fn handle_host(&mut self, msg: HostMsg) {
         match msg {
             HostMsg::Open { name, bytes } => self.open_document(name, bytes),
-            HostMsg::Command(cmd) => match cmd.as_str() {
+            HostMsg::Command(cmd, args) => match cmd.as_str() {
                 "file.save" => self.save_document(),
                 "view.today" => self.select_date(today()),
                 "sync.refresh" => self.refresh_all(),
+                "event.new" => self.open_new_event(self.selected_date, None),
+                "calendar.subscribe" => {
+                    let field = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    self.account_form = AccountForm { kind_ics: true, url: field("url"), name: field("name"), ..Default::default() };
+                    self.add_account_from_form();
+                    if let Some(err) = self.account_form.error.take() {
+                        self.flash(err, true);
+                    }
+                }
                 _ => {}
             },
         }
@@ -755,6 +768,40 @@ impl CalendarCraftApp {
 
     // -----------------------------------------------------------------------------------------
     // Saving options and data
+
+    /// `window.calendarcraft.state`: the calendars and the events around the selected day.
+    fn publish_state(&mut self) {
+        let sig = self.store.events.iter().fold((self.store.calendars.len() as u64) << 32 | self.busy as u64, |acc, e| {
+            acc.wrapping_mul(31).wrapping_add(e.title.len() as u64 + e.date.num_days_from_ce() as u64 + e.id.len() as u64)
+        }) ^ self.selected_date.num_days_from_ce() as u64;
+        if sig == self.published {
+            return;
+        }
+        self.published = sig;
+        let from = self.selected_date - Duration::days(45);
+        let to = self.selected_date + Duration::days(60);
+        let events: Vec<serde_json::Value> = self
+            .store
+            .events
+            .iter()
+            .filter(|e| e.date >= from && e.date <= to)
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id, "title": e.title, "date": e.date.to_string(), "calendar": e.calendar_id,
+                    "start": e.start_time.map(|t| t.format("%H:%M").to_string()), "allDay": e.all_day,
+                })
+            })
+            .collect();
+        let calendars: Vec<serde_json::Value> = self.store.calendars.iter().map(|c| serde_json::json!({"id": c.id, "name": c.name, "account": c.account_id})).collect();
+        let state = serde_json::json!({
+            "date": self.selected_date.to_string(),
+            "busy": self.busy,
+            "calendars": calendars,
+            "events": events,
+            "errors": self.status,
+        });
+        host::publish_state(&state.to_string());
+    }
 
     fn persist(&mut self) {
         if !self.dirty_store || self.now - self.last_saved < 0.6 {
@@ -866,7 +913,8 @@ impl CalendarCraftApp {
         let (esc, n, t_key, left, right, save) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Escape),
-                i.modifiers.command && i.key_pressed(egui::Key::N),
+                // ⌘N natively; browsers keep Ctrl/⌘N for a new window, so N or C alone too.
+                (i.modifiers.command && i.key_pressed(egui::Key::N)) || (!typing && !i.modifiers.any() && (i.key_pressed(egui::Key::N) || i.key_pressed(egui::Key::C))),
                 !i.modifiers.any() && i.key_pressed(egui::Key::T),
                 !i.modifiers.any() && i.key_pressed(egui::Key::ArrowLeft),
                 !i.modifiers.any() && i.key_pressed(egui::Key::ArrowRight),
@@ -987,6 +1035,7 @@ impl eframe::App for CalendarCraftApp {
             self.desktop_layout(ctx);
         }
         self.popups(ctx);
+        self.publish_state();
         self.persist();
         if self.dirty_store {
             ctx.request_repaint_after(std::time::Duration::from_millis(700));

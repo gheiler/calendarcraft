@@ -47,9 +47,7 @@ fn week_spans(app: &CalendarCraftApp, start: NaiveDate, days: usize) -> (Vec<Spa
         if lanes.len() <= lane {
             lanes.resize(lane + 1, vec![false; days]);
         }
-        for c in first..=last {
-            lanes[lane][c] = true;
-        }
+        lanes[lane][first..=last].fill(true);
         out.push(Span { ev, first, last, lane });
     }
     let per_day: Vec<usize> = (0..days).map(|c| lanes.iter().rposition(|row| row[c]).map(|l| l + 1).unwrap_or(0)).collect();
@@ -275,7 +273,7 @@ impl CalendarCraftApp {
         let selected_id = self.inspector.as_ref().map(|i| i.event_id.clone());
         let mut clicked: Option<(String, Rect)> = None;
         let line_h = 18.0;
-        let max_lines = (((cell_h - 26.0) / line_h).floor() as usize).max(0);
+        let max_lines = ((cell_h - 26.0) / line_h).floor() as usize;
         for m in 0..3 {
             let month = add_months(start, m);
             let left = area.left() + m as f32 * block_w;
@@ -434,7 +432,7 @@ impl CalendarCraftApp {
                     self.set_view(ViewMode::Day);
                 }
                 if count > 0 {
-                    resp.on_hover_text(format!("{count} {}", t("events")));
+                    resp.on_hover_text(format!("{count} {}", t(if count == 1 { "event" } else { "events" })));
                 }
             }
         }

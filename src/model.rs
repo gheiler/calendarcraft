@@ -4,19 +4,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ViewMode {
     Day,
     Week,
+    #[default]
     Month,
     Quarter,
     Year,
 }
 
-impl Default for ViewMode {
-    fn default() -> Self {
-        Self::Month
-    }
-}
 
 impl ViewMode {
     pub fn label(&self) -> &'static str {

@@ -211,9 +211,9 @@ pub fn call_tool(store: &mut CalendarStore, name: &str, args: &Value) -> Result<
             let events: Vec<&CalendarEvent> = store
                 .events
                 .iter()
-                .filter(|ev| start_filter.map_or(true, |sd| ev.date >= sd))
-                .filter(|ev| end_filter.map_or(true, |ed| ev.date <= ed))
-                .filter(|ev| cal_filter.map_or(true, |cid| ev.calendar_id == cid))
+                .filter(|ev| start_filter.is_none_or(|sd| ev.date >= sd))
+                .filter(|ev| end_filter.is_none_or(|ed| ev.date <= ed))
+                .filter(|ev| cal_filter.is_none_or(|cid| ev.calendar_id == cid))
                 .filter(|ev| {
                     query.is_empty()
                         || ev.title.to_lowercase().contains(&query)
