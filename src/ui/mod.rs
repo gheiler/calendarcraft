@@ -2,6 +2,7 @@
 //! calendar, calendars, the day-by-day list) and the calendar (Day, Week, Month, Quarter, Year),
 //! event details in a popover and new events in a dialog. Narrow windows get a phone layout.
 
+mod icons;
 mod popups;
 mod side;
 mod views;
@@ -57,6 +58,10 @@ pub struct Launch {
     /// Use the sample data, ignoring what is stored.
     pub demo: bool,
     pub language: Option<String>,
+    /// Open Settings on this tab (0 General, 1 Accounts).
+    pub settings: Option<u8>,
+    /// Show or hide the sidebar, overriding the saved choice.
+    pub sidebar: Option<bool>,
 }
 
 /// The `.ics` document the host opened (artcraftCloud's drive).
@@ -120,6 +125,8 @@ pub struct CalendarCraftApp {
     pub new_event: Option<NewEvent>,
     pub settings_open: bool,
     pub settings_tab: u8,
+    /// Last drawn size of each dialog (see `settle`).
+    pub popup_sizes: HashMap<&'static str, egui::Vec2>,
     pub account_form: AccountForm,
     pub mcp_open: bool,
     pub mcp_request: String,
@@ -149,6 +156,30 @@ pub struct CalendarCraftApp {
     pub timeline_scrolled: bool,
     pub scroll_accum: f32,
 
+    /// The Month strip: its top edge in week rows from 5 Jan 1970 (NaN until first drawn), where
+    /// it glides to, the selection it last followed, the month in focus and its top week.
+    pub month_pos: f64,
+    pub month_target: Option<f64>,
+    pub month_synced: NaiveDate,
+    pub month_focus: NaiveDate,
+    pub month_top_week: NaiveDate,
+    pub month_input_at: f64,
+    pub month_settle: bool,
+    /// The list was scrolled by hand to this day (the Month strip follows).
+    pub agenda_moved: Option<NaiveDate>,
+    /// The first day the list shows at its top.
+    pub agenda_top: Option<NaiveDate>,
+    pub last_view: Option<ViewMode>,
+    /// The sidebar over the calendar (narrow windows, or peeked from the left edge).
+    pub sidebar_overlay: bool,
+    pub sidebar_peek: bool,
+    pub edge_since: Option<f64>,
+    /// The search field opened from its icon in a narrow toolbar.
+    pub search_open: bool,
+    /// Enter was pressed in the quick entry this frame.
+    pub quick_enter: bool,
+    motion: bool,
+
     dirty_store: bool,
     last_saved: f64,
     now: f64,
@@ -170,6 +201,9 @@ impl CalendarCraftApp {
         }
         if let Some(l) = &launch.language {
             prefs.language = l.clone();
+        }
+        if let Some(sb) = launch.sidebar {
+            prefs.sidebar = sb;
         }
         let host_cfg = host::host_config();
         let hosted = host::hosted();
@@ -214,6 +248,7 @@ impl CalendarCraftApp {
             new_event: None,
             settings_open: false,
             settings_tab: 0,
+            popup_sizes: HashMap::new(),
             account_form: AccountForm::default(),
             mcp_open: false,
             mcp_request: sample_mcp,
@@ -236,6 +271,22 @@ impl CalendarCraftApp {
             agenda_offset: 0.0,
             timeline_scrolled: false,
             scroll_accum: 0.0,
+            month_pos: f64::NAN,
+            month_target: None,
+            month_synced: anchor,
+            month_focus: first_of_month(anchor),
+            month_top_week: week_start(anchor),
+            month_input_at: 0.0,
+            month_settle: false,
+            agenda_moved: None,
+            agenda_top: None,
+            last_view: None,
+            sidebar_overlay: false,
+            sidebar_peek: false,
+            edge_since: None,
+            search_open: false,
+            quick_enter: false,
+            motion: true,
             dirty_store: false,
             last_saved: 0.0,
             now: 0.0,
@@ -331,6 +382,18 @@ impl CalendarCraftApp {
         }
     }
 
+    /// Today: select it and, in Month, bring its month back into view even when the selection
+    /// was already today (the strip may have been scrolled away).
+    pub fn go_today(&mut self) {
+        let now = today();
+        self.select_date(now);
+        if !self.month_pos.is_nan() {
+            self.month_synced = now;
+            self.month_target = Some(views::row_of(week_start(first_of_month(now))) as f64);
+        }
+        self.agenda_scroll_to = Some(now);
+    }
+
     pub fn set_view(&mut self, mode: ViewMode) {
         self.view_mode = mode;
         self.prefs.view = mode;
@@ -343,8 +406,26 @@ impl CalendarCraftApp {
         self.banner_until = self.now + if error { 8.0 } else { 4.0 };
     }
 
+    /// egui sizes grids, scroll areas and modals from the frame before; draw again until a
+    /// dialog stops changing size, so it never rests half-measured (cut off at the bottom).
+    pub fn settle(&mut self, ctx: &egui::Context, key: &'static str, size: egui::Vec2) {
+        if self.popup_sizes.get(key) != Some(&size) {
+            self.popup_sizes.insert(key, size);
+            ctx.request_repaint();
+        }
+    }
+
+    pub fn reduced_motion(&self) -> bool {
+        !self.motion
+    }
+
     pub fn step(&mut self, dir: i64) {
-        let d = self.selected_date;
+        let mut d = self.selected_date;
+        if self.view_mode == ViewMode::Month && !self.month_pos.is_nan() {
+            // From the month in view (the strip may have been scrolled away from the selection).
+            let focus = self.month_focus;
+            d = NaiveDate::from_ymd_opt(focus.year(), focus.month(), d.day().min(days_in_month(focus.year(), focus.month()))).unwrap_or(focus);
+        }
         let next = match self.view_mode {
             ViewMode::Day => d + Duration::days(dir),
             ViewMode::Week => d + Duration::days(7 * dir),
@@ -859,6 +940,7 @@ impl CalendarCraftApp {
             theme::apply(ctx, &self.palette, animations);
             i18n::set_language(&self.prefs.language);
             self.applied_style = Some(key);
+            self.motion = animations;
         }
     }
 
@@ -902,6 +984,10 @@ impl CalendarCraftApp {
         if self.launch.new_event {
             self.open_new_event(self.selected_date, None);
         }
+        if let Some(tab) = self.launch.settings {
+            self.settings_open = true;
+            self.settings_tab = tab;
+        }
     }
 
     pub fn is_mobile(&self, ctx: &egui::Context) -> bool {
@@ -910,7 +996,7 @@ impl CalendarCraftApp {
 
     pub fn keyboard(&mut self, ctx: &egui::Context) {
         let typing = ctx.wants_keyboard_input();
-        let (esc, n, t_key, left, right, save) = ctx.input(|i| {
+        let (esc, n, t_key, left, right, save, sidebar) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Escape),
                 // ⌘N natively; browsers keep Ctrl/⌘N for a new window, so N or C alone too.
@@ -919,6 +1005,7 @@ impl CalendarCraftApp {
                 !i.modifiers.any() && i.key_pressed(egui::Key::ArrowLeft),
                 !i.modifiers.any() && i.key_pressed(egui::Key::ArrowRight),
                 i.modifiers.command && i.key_pressed(egui::Key::S),
+                i.modifiers.command && i.key_pressed(egui::Key::Backslash),
             )
         });
         if esc {
@@ -936,9 +1023,12 @@ impl CalendarCraftApp {
         if save {
             self.save_document();
         }
+        if sidebar && !self.is_mobile(ctx) {
+            self.toggle_sidebar(ctx);
+        }
         if !typing && self.inspector.is_none() && self.new_event.is_none() {
             if t_key {
-                self.select_date(today());
+                self.go_today();
             }
             if left {
                 self.step(-1);
