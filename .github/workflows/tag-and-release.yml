@@ -1,0 +1,73 @@
+name: Tag and release
+
+# On every push to main, read the version in Cargo.toml. If tag v<version> is
+# not already on the repository, create an annotated tag on this commit and
+# publish the release by calling release.yml. If the tag exists but the GitHub
+# release does not (a previous run stopped halfway), only the release is built.
+# A tag already released is a no-op, so a later merge that forgot to bump the
+# version will not move the tag or replace the release.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tag-and-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      should_release: ${{ steps.plan.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Cargo.toml version is not X.Y.Z: $VERSION" >&2
+            exit 1
+          fi
+          TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version on this commit is $TAG."
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; it is not moved."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "CalendarCraft $TAG"
+            if git push origin "refs/tags/$TAG"; then
+              echo "Created annotated tag $TAG on $GITHUB_SHA."
+            elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+              echo "Tag $TAG appeared while this job ran; it is not moved."
+            else
+              echo "Failed to push tag $TAG." >&2
+              exit 1
+            fi
+          fi
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; nothing to publish."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: tag
+    if: needs.tag.outputs.should_release == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    secrets: inherit
+    permissions:
+      contents: write
