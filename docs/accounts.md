@@ -33,3 +33,15 @@ can't be written to without an OAuth sign-in, which CalendarCraft doesn't have y
   servers (Fastmail) like `/api/calendar/remote`; (b) an IMAP↔JMAP bridge on the server (a
   sizeable component, credentials held server-side); (c) let Stalwart fetch the external mailbox
   into the user's mailbox (Stalwart has no built-in IMAP fetcher; a fetchmail/imapsync sidecar).
+
+## Where passwords are kept
+
+CalendarCraft no longer writes account passwords as a plaintext JSON map.
+
+| How you run it | Where the password lives |
+|---|---|
+| Desktop app | The OS credential store: macOS Keychain, Windows Credential Manager, or Linux Secret Service. The service name is `CalendarCraft`; the account is the calendar account id (`acc_…`). |
+| Standalone web | Encrypted with WebCrypto AES-GCM. The key is a non-extractable `CryptoKey` in IndexedDB (`calendarcraft-keys`). Only the ciphertext and nonce are in `localStorage["calendarcraft.secrets"]`. This protects a copied storage dump or a casual look at the disk; it does not protect against script running on this same origin. |
+| Inside artcraftCloud | The server keeps them sealed with its vault (ChaCha20-Poly1305, per person and account). The remote calendar proxy attaches the password on the server; it is not stored in the browser and is not sent back. |
+
+If an older `calendarcraft.secrets` plaintext map is still present, it is moved into the new store the first time the app starts, and then deleted. When the app is hosted, each leftover password is stored with the username already on that account (or the account's email if the username was never saved).

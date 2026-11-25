@@ -1,6 +1,6 @@
 [package]
 name = "calendarcraft"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Clean-room calendar app in Rust for macOS, WebAssembly, and MCP"
 
@@ -32,13 +32,14 @@ winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
 ureq = "2.12"
 pollster = "0.4"
+keyring = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Location", "Storage", "Request", "RequestInit", "RequestCredentials", "RequestRedirect", "Response", "Headers", "MessageEvent", "UrlSearchParams", "Navigator", "MediaQueryList"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Location", "Storage", "Request", "RequestInit", "RequestCredentials", "RequestRedirect", "Response", "Headers", "MessageEvent", "UrlSearchParams", "Navigator", "MediaQueryList", "Crypto", "CryptoKey", "SubtleCrypto", "AesKeyGenParams", "AesGcmParams", "Event", "IdbFactory", "IdbDatabase", "IdbOpenDbRequest", "IdbRequest", "IdbObjectStore", "IdbTransaction", "IdbTransactionMode", "IdbObjectStoreParameters", "DomStringList", "IdbVersionChangeEvent"] }
 
 [dev-dependencies]
 # Reads the bundled font in tests/glyphs.rs (already in the tree through egui).

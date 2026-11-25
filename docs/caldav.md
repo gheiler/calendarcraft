@@ -49,7 +49,7 @@ browser (CalendarCraft, same origin)            artcraftCloud                   
   Only http(s), only public addresses (`ARTCRAFT_CALENDAR_ALLOW_PRIVATE=1` for a lab), the
   checked address is the one connected to, redirects are returned (not followed), and
   `WWW-Authenticate` is dropped. The credential for such a server is kept by CalendarCraft in the
-  browser (`calendarcraft.secrets`, never uploaded by the shell).
+  server, sealed in artcraftCloud's vault; the proxy attaches it and the password does not sit in the browser.
 - An `.ics` file in the drive opens in CalendarCraft (`.ics`, `.ical`, `.ifb`) and is saved
   back with the shell's Save/Autosave.
 - artcraftCloud's Settings write `theme`, `language` and `animations` into `calendarcraft.ui`.

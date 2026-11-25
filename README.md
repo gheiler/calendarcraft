@@ -67,7 +67,7 @@ CALDAV_TEST_PASS=… cargo test --test caldav_live`.
 |---|---|---|
 | options | `~/Library/Application Support/CalendarCraft/calendarcraft.ui.json` | `localStorage["calendarcraft.ui"]` |
 | accounts, local calendars | `…/calendarcraft.store.json` | `calendarcraft.store` |
-| account passwords | `…/calendarcraft.secrets.json` (mode 0600) | `calendarcraft.secrets` (this browser only) |
+| account passwords | macOS Keychain, Windows Credential Manager or Linux Secret Service (service `CalendarCraft`) | standalone: ciphertext in `localStorage["calendarcraft.secrets"]`, key in IndexedDB; inside artcraftCloud: sealed on the server |
 | copy of server events | `…/calendarcraft.cache.json` | `calendarcraft.cache` |
 
 `CALENDARCRAFT_HOME` moves the desktop folder. `--config <file>` still loads a preloaded store.
@@ -103,7 +103,7 @@ password. How artcraftCloud does it: [docs/caldav.md](docs/caldav.md).
   exceptions) is shown read-only.
 - Google Calendar has no password sign-in for CalDAV (OAuth only): use its secret iCal address.
 - Microsoft 365 / Outlook.com has no CalDAV: publish the calendar and subscribe to its ICS link.
-- Account passwords for other servers stay on the device (file or `localStorage`), never uploaded.
+- Account passwords for other servers stay in the OS credential store (desktop) or, in a standalone browser, as ciphertext only (see [docs/accounts.md](docs/accounts.md)). Inside artcraftCloud they are sealed on the server and never kept in the browser.
 
 Upstream needs (ArtCraft host contract, egui) are in [docs/upstream-needs.md](docs/upstream-needs.md).
 

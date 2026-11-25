@@ -15,7 +15,7 @@ fn discover_put_report_delete() {
     };
     let user = std::env::var("CALDAV_TEST_USER").unwrap_or_default();
     let pass = std::env::var("CALDAV_TEST_PASS").unwrap_or_default();
-    let ep = Endpoint { base: url, auth: Some((user, pass)), proxy: None, host_managed: false };
+    let ep = Endpoint { base: url, auth: Some((user, pass)), proxy: None, host_managed: false, account_id: None };
     pollster::block_on(async {
         let cals = sync::discover(&ep).await.expect("discover");
         println!("calendars: {cals:#?}");
