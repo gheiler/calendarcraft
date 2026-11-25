@@ -3,7 +3,7 @@
 | # | Where | Need | Today |
 |---|---|---|---|
 | 1 | craft-web-host contract | A settings message (theme, language, animations) | artcraftCloud edits `calendarcraft.ui` in `localStorage` before start; a live change needs a reload |
-| 2 | craft-web-host contract | A secrets store per app (or a host keychain) | external account passwords sit in `localStorage` (`calendarcraft.secrets`), kept off the server by the shell's LOCAL_ONLY list |
+| 2 | craft-web-host contract | A generic secrets store per app | artcraftCloud now keeps CalendarCraft's remote passwords in its vault (`/api/calendar/remote/credentials`); a generic host-contract secret store would still help other apps |
 | 3 | craft-web-host contract | A host network API (`fetch` through the host) | artcraftCloud's CSP is `connect-src 'self'`; CalendarCraft uses the host's `remoteProxy` named in `window.calendarcraftHost` |
 | 4 | craft-web-host contract | "New" with no file for apps that don't edit documents | the shell opens CalendarCraft as *Untitled.ics*; CalendarCraft only reports dirty for an opened file |
 | 5 | Browsers / egui | Ctrl+N and ⌘N are reserved by browsers | N or C opens the new-event dialog in the browser |

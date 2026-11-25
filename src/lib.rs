@@ -9,6 +9,7 @@ pub mod model;
 pub mod net;
 pub mod nlp;
 pub mod recur;
+pub mod secrets;
 pub mod sync;
 pub mod theme;
 pub mod ui;

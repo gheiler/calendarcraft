@@ -6,8 +6,9 @@
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 
-/// Keys in storage. `calendarcraft.secrets` and `calendarcraft.cache` stay on this device (hosts
-/// that copy options to a server should skip them).
+/// Keys in storage. `calendarcraft.cache` stays on this device (hosts that copy options to a
+/// server should skip it). Account passwords are no longer kept as a plaintext `calendarcraft.secrets`
+/// map: see [`crate::secrets`]. A leftover plaintext key is migrated and deleted on start.
 pub const KEY_UI: &str = "calendarcraft.ui";
 pub const KEY_STORE: &str = "calendarcraft.store";
 pub const KEY_SECRETS: &str = "calendarcraft.secrets";
@@ -80,6 +81,13 @@ pub fn save(key: &str, value: &str) {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn remove(key: &str) {
+    if let Some(s) = local_storage() {
+        let _ = s.remove_item(key);
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn dir() -> std::path::PathBuf {
     if let Ok(d) = std::env::var("CALENDARCRAFT_HOME") {
@@ -113,6 +121,11 @@ pub fn save(key: &str, value: &str) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remove(key: &str) {
+    let _ = std::fs::remove_file(dir().join(format!("{key}.json")));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Page parameters and the host bridge
 
@@ -132,8 +145,13 @@ pub fn query(_key: &str) -> Option<String> {
 pub fn hosted() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        let search = web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default();
-        search.trim_start_matches('?').split('&').any(|p| p == "host=parent")
+        let search = web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .unwrap_or_default();
+        search
+            .trim_start_matches('?')
+            .split('&')
+            .any(|p| p == "host=parent")
     }
     #[cfg(not(target_arch = "wasm32"))]
     false
@@ -141,12 +159,23 @@ pub fn hosted() -> bool {
 
 #[cfg(target_arch = "wasm32")]
 pub fn host_config() -> HostConfig {
-    let Some(window) = web_sys::window() else { return HostConfig::default() };
-    let Ok(value) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("calendarcraftHost")) else { return HostConfig::default() };
+    let Some(window) = web_sys::window() else {
+        return HostConfig::default();
+    };
+    let Ok(value) = js_sys::Reflect::get(
+        &window,
+        &wasm_bindgen::JsValue::from_str("calendarcraftHost"),
+    ) else {
+        return HostConfig::default();
+    };
     if value.is_undefined() || value.is_null() {
         return HostConfig::default();
     }
-    js_sys::JSON::stringify(&value).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    js_sys::JSON::stringify(&value)
+        .ok()
+        .and_then(|s| s.as_string())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -168,7 +197,9 @@ mod bridge {
     }
 
     fn origin() -> String {
-        web_sys::window().and_then(|w| w.location().origin().ok()).unwrap_or_default()
+        web_sys::window()
+            .and_then(|w| w.location().origin().ok())
+            .unwrap_or_default()
     }
 
     fn message(kind: &str, fields: &[(&str, JsValue)]) -> js_sys::Object {
@@ -195,7 +226,9 @@ mod bridge {
     }
 
     pub fn install(inbox: HostInbox, wake: Arc<dyn Fn() + Send + Sync>) {
-        let Some(window) = web_sys::window() else { return };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
         let own = origin();
         let inbox2 = inbox.clone();
         let wake2 = wake.clone();
@@ -209,25 +242,41 @@ mod bridge {
                 }
             }
             let data = event.data();
-            let ty = js_sys::Reflect::get(&data, &"type".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
+            let ty = js_sys::Reflect::get(&data, &"type".into())
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
             if ty == "calendarcraft:open" {
-                let name = js_sys::Reflect::get(&data, &"name".into()).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "Calendar.ics".into());
-                let bytes = js_sys::Reflect::get(&data, &"bytes".into()).ok().map(|b| js_sys::Uint8Array::new(&b).to_vec()).unwrap_or_default();
+                let name = js_sys::Reflect::get(&data, &"name".into())
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_else(|| "Calendar.ics".into());
+                let bytes = js_sys::Reflect::get(&data, &"bytes".into())
+                    .ok()
+                    .map(|b| js_sys::Uint8Array::new(&b).to_vec())
+                    .unwrap_or_default();
                 if let Ok(mut q) = inbox2.lock() {
                     q.push(HostMsg::Open { name, bytes });
                 }
                 wake2();
             }
         }) as Box<dyn FnMut(web_sys::MessageEvent)>);
-        let _ = window.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref());
+        let _ =
+            window.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref());
         on_message.forget();
 
         // Page API: window.calendarcraft.execute("file.save") (the host's autosave uses it).
         let api = js_sys::Object::new();
         let execute = Closure::wrap(Box::new(move |command: JsValue, args: JsValue| -> JsValue {
-            let Some(cmd) = command.as_string() else { return JsValue::FALSE };
+            let Some(cmd) = command.as_string() else {
+                return JsValue::FALSE;
+            };
             let args = if args.is_object() {
-                js_sys::JSON::stringify(&args).ok().and_then(|s| s.as_string()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+                js_sys::JSON::stringify(&args)
+                    .ok()
+                    .and_then(|s| s.as_string())
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default()
             } else {
                 serde_json::Value::Null
             };
@@ -248,7 +297,9 @@ mod bridge {
 pub fn publish_state(json: &str) {
     #[cfg(target_arch = "wasm32")]
     {
-        let Some(window) = web_sys::window() else { return };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
         if let Ok(api) = js_sys::Reflect::get(&window, &"calendarcraft".into()) {
             if api.is_object() {
                 let _ = js_sys::Reflect::set(&api, &"state".into(), &json.into());
@@ -280,7 +331,11 @@ pub fn post_save(name: &str, bytes: &[u8]) {
     {
         let arr = js_sys::Uint8Array::from(bytes);
         let buf = arr.buffer();
-        bridge::post("calendarcraft:save", &[("name", name.into()), ("bytes", buf.clone().into())], Some(&buf));
+        bridge::post(
+            "calendarcraft:save",
+            &[("name", name.into()), ("bytes", buf.clone().into())],
+            Some(&buf),
+        );
     }
     #[cfg(not(target_arch = "wasm32"))]
     let _ = (name, bytes);

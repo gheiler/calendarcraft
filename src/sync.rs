@@ -24,6 +24,9 @@ pub struct Endpoint {
     pub proxy: Option<String>,
     /// The host signs requests itself (cookie on the same origin): mark them as the app's own.
     pub host_managed: bool,
+    /// When the request goes through artcraftCloud's remote proxy, name the account so the
+    /// server can attach the stored password; the password itself is not sent.
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,11 +40,36 @@ pub struct RemoteCalendar {
 
 #[derive(Debug, Clone)]
 pub enum SyncMsg {
-    Calendars { account_id: String, calendars: Vec<RemoteCalendar> },
-    Events { calendar_id: String, events: Vec<CalendarEvent>, name: Option<String>, color: Option<String> },
-    Saved { event_id: String, href: String, etag: Option<String> },
-    Deleted { event_id: String },
-    Failed { account_id: String, what: String },
+    Calendars {
+        account_id: String,
+        calendars: Vec<RemoteCalendar>,
+    },
+    Events {
+        calendar_id: String,
+        events: Vec<CalendarEvent>,
+        name: Option<String>,
+        color: Option<String>,
+    },
+    Saved {
+        event_id: String,
+        href: String,
+        etag: Option<String>,
+    },
+    Deleted {
+        event_id: String,
+    },
+    Failed {
+        account_id: String,
+        what: String,
+    },
+    /// Passwords finished loading (and any leftover plaintext was moved).
+    SecretsReady {
+        map: std::collections::BTreeMap<String, String>,
+    },
+    /// A password was stored with the host; the account can be synced now.
+    SecretSaved {
+        account_id: String,
+    },
 }
 
 /// Messages from background work, and a way to wake the UI.
@@ -53,7 +81,10 @@ pub struct Inbox {
 
 impl Inbox {
     pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
-        Self { items: Arc::new(Mutex::new(Vec::new())), wake }
+        Self {
+            items: Arc::new(Mutex::new(Vec::new())),
+            wake,
+        }
     }
     pub fn push(&self, msg: SyncMsg) {
         if let Ok(mut items) = self.items.lock() {
@@ -62,27 +93,53 @@ impl Inbox {
         (self.wake)();
     }
     pub fn drain(&self) -> Vec<SyncMsg> {
-        self.items.lock().map(|mut items| std::mem::take(&mut *items)).unwrap_or_default()
+        self.items
+            .lock()
+            .map(|mut items| std::mem::take(&mut *items))
+            .unwrap_or_default()
     }
 }
 
 impl Endpoint {
-    fn request(&self, method: &str, url: &str, depth: Option<&str>, body: Option<String>, extra: &[(&str, String)]) -> HttpRequest {
+    fn request(
+        &self,
+        method: &str,
+        url: &str,
+        depth: Option<&str>,
+        body: Option<String>,
+        extra: &[(&str, String)],
+    ) -> HttpRequest {
         let mut headers: Vec<(String, String)> = Vec::new();
         if let Some(d) = depth {
             headers.push(("Depth".into(), d.into()));
         }
-        if body.is_some() && !extra.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
-            headers.push(("Content-Type".into(), "application/xml; charset=utf-8".into()));
+        if body.is_some()
+            && !extra
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            headers.push((
+                "Content-Type".into(),
+                "application/xml; charset=utf-8".into(),
+            ));
         }
         for (k, v) in extra {
             headers.push(((*k).into(), v.clone()));
         }
-        let auth = self.auth.as_ref().map(|(user, pass)| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"))));
+        let auth = self.auth.as_ref().map(|(user, pass)| {
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"))
+            )
+        });
         let url = match &self.proxy {
             Some(proxy) => {
                 headers.push(("x-calendar-url".into(), url.to_string()));
-                if let Some(a) = auth {
+                if let Some(id) = &self.account_id {
+                    headers.push(("x-calendar-account".into(), id.clone()));
+                } else if let Some(a) = auth {
+                    // Older path: a host without a credential store. New artcraftCloud attaches
+                    // the password itself when x-calendar-account is set.
                     headers.push(("x-calendar-auth".into(), a));
                 }
                 headers.push(("x-requested-with".into(), "artcraft".into()));
@@ -98,16 +155,30 @@ impl Endpoint {
                 url.to_string()
             }
         };
-        HttpRequest { method: method.into(), url, headers, body }
+        HttpRequest {
+            method: method.into(),
+            url,
+            headers,
+            body,
+        }
     }
 
-    async fn send(&self, method: &str, url: &str, depth: Option<&str>, body: Option<String>, extra: &[(&str, String)]) -> Result<(String, HttpResponse), String> {
+    async fn send(
+        &self,
+        method: &str,
+        url: &str,
+        depth: Option<&str>,
+        body: Option<String>,
+        extra: &[(&str, String)],
+    ) -> Result<(String, HttpResponse), String> {
         let mut at = url.to_string();
         for _ in 0..5 {
             let resp = net::send(self.request(method, &at, depth, body.clone(), extra)).await?;
             match (resp.status, &resp.location) {
                 (301 | 302 | 303 | 307 | 308, Some(loc)) => at = caldav::resolve(&at, loc),
-                (401, _) => return Err("the server did not accept the user name and password".into()),
+                (401, _) => {
+                    return Err("the server did not accept the user name and password".into())
+                }
                 (403, _) => return Err("the server refused access".into()),
                 _ => return Ok((at, resp)),
             }
@@ -115,10 +186,21 @@ impl Endpoint {
         Err("too many redirects".into())
     }
 
-    async fn propfind(&self, url: &str, depth: &str, body: &str) -> Result<(String, Vec<DavResponse>), String> {
-        let (at, resp) = self.send("PROPFIND", url, Some(depth), Some(body.to_string()), &[]).await?;
+    async fn propfind(
+        &self,
+        url: &str,
+        depth: &str,
+        body: &str,
+    ) -> Result<(String, Vec<DavResponse>), String> {
+        let (at, resp) = self
+            .send("PROPFIND", url, Some(depth), Some(body.to_string()), &[])
+            .await?;
         if resp.status != 207 {
-            return Err(format!("{} answered {} to PROPFIND", net::host_of(&at), resp.status));
+            return Err(format!(
+                "{} answered {} to PROPFIND",
+                net::host_of(&at),
+                resp.status
+            ));
         }
         Ok((at.clone(), caldav::parse_multistatus(&resp.body)?))
     }
@@ -156,15 +238,26 @@ pub async fn discover(ep: &Endpoint) -> Result<Vec<RemoteCalendar>, String> {
     }
     let mut starts = vec![base.clone()];
     if let Some(i) = base.find("://") {
-        let origin_end = base[i + 3..].find('/').map(|j| i + 3 + j).unwrap_or(base.len());
+        let origin_end = base[i + 3..]
+            .find('/')
+            .map(|j| i + 3 + j)
+            .unwrap_or(base.len());
         starts.push(format!("{}/.well-known/caldav", &base[..origin_end]));
     }
     for start in starts {
-        let Ok((at, list)) = ep.propfind(&start, "0", caldav::PROPFIND_PRINCIPAL).await else { continue };
-        let Some(principal) = list.iter().find_map(|r| r.principal.clone()) else { continue };
+        let Ok((at, list)) = ep.propfind(&start, "0", caldav::PROPFIND_PRINCIPAL).await else {
+            continue;
+        };
+        let Some(principal) = list.iter().find_map(|r| r.principal.clone()) else {
+            continue;
+        };
         let principal = caldav::resolve(&at, &principal);
-        let Ok((at, list)) = ep.propfind(&principal, "0", caldav::PROPFIND_HOME).await else { continue };
-        let Some(home) = list.iter().find_map(|r| r.home.clone()) else { continue };
+        let Ok((at, list)) = ep.propfind(&principal, "0", caldav::PROPFIND_HOME).await else {
+            continue;
+        };
+        let Some(home) = list.iter().find_map(|r| r.home.clone()) else {
+            continue;
+        };
         let home = caldav::resolve(&at, &home);
         let (at, list) = ep.propfind(&home, "1", caldav::PROPFIND_CALENDARS).await?;
         return Ok(calendars_in(&at, &list));
@@ -186,17 +279,33 @@ pub fn remote_id(href: &str, n: usize) -> String {
 }
 
 /// Events of one calendar that touch `[from, to)`.
-pub async fn fetch_events(ep: &Endpoint, cal_url: &str, calendar_id: &str, from: NaiveDate, to: NaiveDate) -> Result<Vec<CalendarEvent>, String> {
+pub async fn fetch_events(
+    ep: &Endpoint,
+    cal_url: &str,
+    calendar_id: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<CalendarEvent>, String> {
     let body = caldav::report_range(&utc_bound(from), &utc_bound(to));
-    let (at, resp) = ep.send("REPORT", cal_url, Some("1"), Some(body), &[]).await?;
+    let (at, resp) = ep
+        .send("REPORT", cal_url, Some("1"), Some(body), &[])
+        .await?;
     if resp.status != 207 {
-        return Err(format!("{} answered {} to REPORT", net::host_of(&at), resp.status));
+        return Err(format!(
+            "{} answered {} to REPORT",
+            net::host_of(&at),
+            resp.status
+        ));
     }
     let mut out = Vec::new();
     for item in caldav::parse_multistatus(&resp.body)? {
-        let Some(data) = &item.calendar_data else { continue };
+        let Some(data) = &item.calendar_data else {
+            continue;
+        };
         let href = caldav::resolve(&at, &item.href);
-        let Ok(parsed) = ics::parse(data, calendar_id) else { continue };
+        let Ok(parsed) = ics::parse(data, calendar_id) else {
+            continue;
+        };
         let several = parsed.events.len() > 1;
         for (n, mut ev) in parsed.events.into_iter().enumerate() {
             ev.id = remote_id(&href, n);
@@ -210,16 +319,37 @@ pub async fn fetch_events(ep: &Endpoint, cal_url: &str, calendar_id: &str, from:
 }
 
 fn safe_name(uid: &str) -> String {
-    let clean: String = uid.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
-    if clean.trim_matches('-').is_empty() { ics::short_hash(uid) } else { clean }
+    let clean: String = uid
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if clean.trim_matches('-').is_empty() {
+        ics::short_hash(uid)
+    } else {
+        clean
+    }
 }
 
 /// Create or replace an event. Returns its href and new ETag (when the server sends one).
-pub async fn put_event(ep: &Endpoint, cal_url: &str, ev: &CalendarEvent) -> Result<(String, Option<String>), String> {
+pub async fn put_event(
+    ep: &Endpoint,
+    cal_url: &str,
+    ev: &CalendarEvent,
+) -> Result<(String, Option<String>), String> {
     let url = match &ev.href {
         Some(h) => h.clone(),
         None => {
-            let dir = if cal_url.ends_with('/') { cal_url.to_string() } else { format!("{cal_url}/") };
+            let dir = if cal_url.ends_with('/') {
+                cal_url.to_string()
+            } else {
+                format!("{cal_url}/")
+            };
             format!("{dir}{}.ics", safe_name(&ev.uid_or_id()))
         }
     };
@@ -229,26 +359,41 @@ pub async fn put_event(ep: &Endpoint, cal_url: &str, ev: &CalendarEvent) -> Resu
         _ if ev.href.is_none() => extra.push(("If-None-Match", "*".to_string())),
         _ => {}
     }
-    let (_, resp) = ep.send("PUT", &url, None, Some(ics::write_single(ev)), &extra).await?;
+    let (_, resp) = ep
+        .send("PUT", &url, None, Some(ics::write_single(ev)), &extra)
+        .await?;
     match resp.status {
         200..=299 => Ok((url, resp.etag)),
         412 => Err("the event changed on the server; it was reloaded".into()),
-        code => Err(format!("{} answered {code} when saving \"{}\"", net::host_of(&url), ev.title)),
+        code => Err(format!(
+            "{} answered {code} when saving \"{}\"",
+            net::host_of(&url),
+            ev.title
+        )),
     }
 }
 
 pub async fn delete_event(ep: &Endpoint, href: &str, etag: Option<&str>) -> Result<(), String> {
-    let extra: Vec<(&str, String)> = etag.map(|t| vec![("If-Match", t.to_string())]).unwrap_or_default();
+    let extra: Vec<(&str, String)> = etag
+        .map(|t| vec![("If-Match", t.to_string())])
+        .unwrap_or_default();
     let (_, resp) = ep.send("DELETE", href, None, None, &extra).await?;
     match resp.status {
         200..=299 | 404 => Ok(()),
         412 => Err("the event changed on the server; it was reloaded".into()),
-        code => Err(format!("{} answered {code} when deleting", net::host_of(href))),
+        code => Err(format!(
+            "{} answered {code} when deleting",
+            net::host_of(href)
+        )),
     }
 }
 
 /// Read an `.ics` subscription (`webcal://` is read over HTTPS).
-pub async fn fetch_feed(ep: &Endpoint, url: &str, calendar_id: &str) -> Result<ics::IcsCalendar, String> {
+pub async fn fetch_feed(
+    ep: &Endpoint,
+    url: &str,
+    calendar_id: &str,
+) -> Result<ics::IcsCalendar, String> {
     let url = match url.strip_prefix("webcal://") {
         Some(rest) => format!("https://{rest}"),
         None => url.to_string(),
@@ -259,7 +404,15 @@ pub async fn fetch_feed(ep: &Endpoint, url: &str, calendar_id: &str) -> Result<i
     }
     let mut cal = ics::parse(&resp.body, calendar_id)?;
     for (n, ev) in cal.events.iter_mut().enumerate() {
-        ev.id = format!("feed_{}_{}", ics::short_hash(calendar_id), if ev.uid.is_empty() { n.to_string() } else { ics::short_hash(&format!("{}{}", ev.uid, ev.date)) });
+        ev.id = format!(
+            "feed_{}_{}",
+            ics::short_hash(calendar_id),
+            if ev.uid.is_empty() {
+                n.to_string()
+            } else {
+                ics::short_hash(&format!("{}{}", ev.uid, ev.date))
+            }
+        );
     }
     Ok(cal)
 }
@@ -293,14 +446,69 @@ mod tests {
 
     #[test]
     fn proxied_requests_name_the_target_and_keep_the_password_off_the_host() {
-        let ep = Endpoint { base: "https://dav.example.org/".into(), auth: Some(("ada".into(), "pw".into())), proxy: Some("/api/calendar/remote".into()), host_managed: false };
-        let req = ep.request("PROPFIND", "https://dav.example.org/cal/", Some("1"), Some("<x/>".into()), &[]);
+        let ep = Endpoint {
+            base: "https://dav.example.org/".into(),
+            auth: Some(("ada".into(), "pw".into())),
+            proxy: Some("/api/calendar/remote".into()),
+            host_managed: false,
+            account_id: None,
+        };
+        let req = ep.request(
+            "PROPFIND",
+            "https://dav.example.org/cal/",
+            Some("1"),
+            Some("<x/>".into()),
+            &[],
+        );
         assert_eq!(req.url, "/api/calendar/remote");
-        let h = |k: &str| req.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone());
-        assert_eq!(h("x-calendar-url").as_deref(), Some("https://dav.example.org/cal/"));
+        let h = |k: &str| {
+            req.headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(k))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            h("x-calendar-url").as_deref(),
+            Some("https://dav.example.org/cal/")
+        );
         assert_eq!(h("x-calendar-auth").as_deref(), Some("Basic YWRhOnB3"));
         assert_eq!(h("authorization"), None);
         assert_eq!(h("depth").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn hosted_proxy_names_the_account_and_does_not_send_the_password() {
+        let ep = Endpoint {
+            base: "https://dav.example.org/".into(),
+            auth: Some(("ada".into(), "pw".into())),
+            proxy: Some("/api/calendar/remote".into()),
+            host_managed: false,
+            account_id: Some("acc_one".into()),
+        };
+        let req = ep.request(
+            "PROPFIND",
+            "https://dav.example.org/cal/",
+            Some("1"),
+            None,
+            &[],
+        );
+        let h = |k: &str| {
+            req.headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(k))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(h("x-calendar-account").as_deref(), Some("acc_one"));
+        assert_eq!(
+            h("x-calendar-auth"),
+            None,
+            "the password stays on the server"
+        );
+        assert_eq!(h("authorization"), None);
+        assert!(!req
+            .headers
+            .iter()
+            .any(|(_, v)| v.contains("pw") || v.contains("YWRhOnB3")));
     }
 
     #[test]
