@@ -51,6 +51,7 @@ cargo run --release -- --demo --screenshot shot.png --size 1440x900   # draws, s
 cargo test                                # unit + integration tests
 trunk serve                               # browser build on http://127.0.0.1:8095
 sh scripts/package-web.sh                 # dist-release/calendarcraft-web-<version>.zip + SHA256SUMS.txt
+# A version tag (vX.Y.Z) also writes SHA256SUMS.txt.sig (ed25519). See docs/releasing.md.
 ```
 
 The browser build takes `?view=`, `?theme=`, `?date=`, `?lang=`, `?demo=1` (sample calendars),

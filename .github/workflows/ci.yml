@@ -21,6 +21,8 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
+      - name: sign-sums script
+        run: bash scripts/sign-sums.sh --self-test
       - name: web build
         run: |
           curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.22.2/trunk-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin trunk
