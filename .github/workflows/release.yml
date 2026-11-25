@@ -1,22 +1,60 @@
 name: Release
 
-# Push a tag such as v0.2.1: the web build becomes calendarcraft-web-0.2.1.zip with
-# SHA256SUMS.txt and SHA256SUMS.txt.sig on a GitHub release, which is what
-# artcraftCloud downloads. The .sig is an ed25519 signature over the exact bytes of
-# SHA256SUMS.txt (standard base64, same format as MailCraft); the signing key is the
-# repository secret CALENDARCRAFT_RELEASE_SIGNING_KEY (base64 PKCS#8).
+# Two ways to start a release (both need Cargo.toml's version to match the tag):
+#   - Push a tag such as v0.2.2 (the original, still supported).
+#   - The Tag and release workflow, after a push to main, creates that tag if
+#     it is missing and calls this file (workflow_call). A tag pushed with
+#     GITHUB_TOKEN does not start other workflows, so the jobs have to run here
+#     rather than wait for a second trigger.
+#
+# The web build becomes calendarcraft-web-<version>.zip with SHA256SUMS.txt and
+# SHA256SUMS.txt.sig on a GitHub release, which is what artcraftCloud downloads.
+# The .sig is an ed25519 signature over the exact bytes of SHA256SUMS.txt
+# (standard base64, same format as MailCraft); the signing key is the repository
+# secret CALENDARCRAFT_RELEASE_SIGNING_KEY (base64 PKCS#8).
+#
+# Idempotent: if the GitHub release for this tag already exists, nothing is published again.
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to publish, such as v0.2.2"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  web:
+  already:
     runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.existing.outputs.exists }}
+    steps:
+      - id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $RELEASE_TAG already exists; nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  web:
+    needs: already
+    if: needs.already.outputs.exists != 'true'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -26,7 +64,7 @@ jobs:
         run: |
           curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.22.2/trunk-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin trunk
           sh scripts/package-web.sh
-          test "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" = "$GITHUB_REF_NAME"
+          test "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" = "$RELEASE_TAG"
       - name: sign checksums
         env:
           CALENDARCRAFT_RELEASE_SIGNING_KEY: ${{ secrets.CALENDARCRAFT_RELEASE_SIGNING_KEY }}
@@ -36,4 +74,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           test -f dist-release/SHA256SUMS.txt.sig
-          gh release create "$GITHUB_REF_NAME" dist-release/* --title "CalendarCraft $GITHUB_REF_NAME" --notes "Web build for artcraftCloud and the browser, with SHA256SUMS.txt and an ed25519 signature over it."
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG was created while this job ran; leaving it as it is."
+            exit 0
+          fi
+          gh release create "$RELEASE_TAG" dist-release/* --title "CalendarCraft $RELEASE_TAG" --notes "Web build for artcraftCloud and the browser, with SHA256SUMS.txt and an ed25519 signature over it."

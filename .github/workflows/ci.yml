@@ -32,6 +32,34 @@ jobs:
           name: calendarcraft-web
           path: dist-release/
 
+  version:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: warn if code changed without a version bump
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$BASE:Cargo.toml" 2>/dev/null; then
+            echo "No Cargo.toml on the base commit; skipping."
+            exit 0
+          fi
+          old=$(git show "$BASE:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          new=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$old" != "$new" ]; then
+            echo "Version bumped: $old -> $new."
+            exit 0
+          fi
+          if git diff --name-only "$BASE" HEAD | grep -Eq '^(src/|tests/|scripts/|assets/|web/|Cargo\.(toml|lock))'; then
+            echo "::warning file=Cargo.toml::Code changed but the version in Cargo.toml is still $new. Bump it if this should become a new release when merged."
+          else
+            echo "No code paths changed; version $new is unchanged, which is fine."
+          fi
+
   macos:
     runs-on: macos-latest
     steps:
