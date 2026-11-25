@@ -5,6 +5,7 @@
 use chrono::{Datelike, Duration, NaiveDate};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
+use super::icons::{self, Icon};
 use super::{first_of_month, today, week_start, CalendarCraftApp};
 use crate::i18n::{self, t};
 use crate::model::{AccountKind, CalendarEvent, ViewMode};
@@ -12,25 +13,119 @@ use crate::nlp::parse_quick_entry;
 use crate::theme::{self, font, font_bold, space, text};
 
 const SIDEBAR_W: f32 = 288.0;
+const SIDEBAR_MARGIN: egui::Margin = egui::Margin { left: 16, right: 16, top: 12, bottom: 16 };
+const TOOLBAR_H: f32 = 60.0;
+/// Narrower windows show the sidebar over the calendar instead of beside it.
+const DOCK_MIN_W: f32 = 1000.0;
+/// Narrower windows get the view drop-down instead of the pills.
+const COMPACT_W: f32 = 1200.0;
+/// The left-edge strip that peeks the sidebar, and how long the pointer rests there.
+const EDGE_W: f32 = 6.0;
+const PEEK_DELAY_MS: u64 = 250;
 
 impl CalendarCraftApp {
+    /// Wide windows dock the sidebar (full height, the toolbar beside it, its toggle in the
+    /// sidebar's own top row). When it is hidden, or the window is narrower than `DOCK_MIN_W`,
+    /// the same toggle sits in the toolbar's leading slot, at the same spot, and the sidebar
+    /// comes back docked (wide) or over the calendar (narrow). Resting the pointer on the left
+    /// edge peeks it, and ⌘\ / Ctrl+\ toggles it.
     pub(super) fn desktop_layout(&mut self, ctx: &egui::Context) {
         let p = *self.palette();
-        egui::TopBottomPanel::top("toolbar")
-            .exact_height(60.0)
-            .frame(egui::Frame::new().fill(p.surface).inner_margin(egui::Margin::symmetric(16, 0)).stroke(Stroke::new(1.0_f32, p.line)))
-            .show(ctx, |ui| self.toolbar(ui));
-        if self.prefs.sidebar {
+        let docked = self.sidebar_docked(ctx);
+        if docked {
+            self.sidebar_overlay = false;
             egui::SidePanel::left("sidebar")
                 .exact_width(SIDEBAR_W)
                 .resizable(false)
-                .frame(egui::Frame::new().fill(p.sidebar).inner_margin(egui::Margin::same(16)).stroke(Stroke::new(1.0_f32, p.line)))
+                .frame(egui::Frame::new().fill(p.sidebar).inner_margin(SIDEBAR_MARGIN).stroke(Stroke::new(1.0_f32, p.line)))
                 .show(ctx, |ui| self.sidebar(ui));
         }
+        egui::TopBottomPanel::top("toolbar")
+            .exact_height(TOOLBAR_H)
+            .frame(egui::Frame::new().fill(p.surface).inner_margin(egui::Margin::symmetric(16, 0)).stroke(Stroke::new(1.0_f32, p.line)))
+            .show(ctx, |ui| self.toolbar(ui, docked));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.surface)).show(ctx, |ui| self.calendar_area(ui));
+        if !docked {
+            self.edge_peek(ctx);
+            if self.sidebar_overlay {
+                self.sidebar_over(ctx, &p);
+            }
+        }
+    }
+
+    pub fn sidebar_docked(&self, ctx: &egui::Context) -> bool {
+        self.prefs.sidebar && ctx.screen_rect().width() >= DOCK_MIN_W
+    }
+
+    /// The toggle: hide a docked sidebar; otherwise dock it again (wide) or open it over the
+    /// calendar (narrow); an open overlay closes.
+    pub fn toggle_sidebar(&mut self, ctx: &egui::Context) {
+        let wide = ctx.screen_rect().width() >= DOCK_MIN_W;
+        if self.sidebar_docked(ctx) {
+            self.prefs.sidebar = false;
+        } else if self.sidebar_overlay && !(wide && self.sidebar_peek) {
+            self.sidebar_overlay = false;
+        } else if wide {
+            self.prefs.sidebar = true;
+            self.sidebar_overlay = false;
+        } else {
+            self.sidebar_overlay = true;
+        }
+        self.sidebar_peek = false;
+        self.mark_changed();
+    }
+
+    /// Rest the pointer on the window's left edge (not over the toolbar) to peek the sidebar.
+    fn edge_peek(&mut self, ctx: &egui::Context) {
+        if self.sidebar_overlay || self.inspector.is_some() || self.new_event.is_some() || self.settings_open {
+            self.edge_since = None;
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        let at_edge = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|pos| pos.x <= EDGE_W && pos.y > TOOLBAR_H) && !ctx.input(|i| i.any_touches() || i.pointer.any_down());
+        match (at_edge, self.edge_since) {
+            (false, _) => self.edge_since = None,
+            (true, None) => {
+                self.edge_since = Some(now);
+                ctx.request_repaint_after(std::time::Duration::from_millis(PEEK_DELAY_MS));
+            }
+            (true, Some(since)) if now - since >= PEEK_DELAY_MS as f64 / 1000.0 => {
+                self.sidebar_overlay = true;
+                self.sidebar_peek = true;
+                self.edge_since = None;
+            }
+            (true, Some(_)) => ctx.request_repaint_after(std::time::Duration::from_millis(40)),
+        }
+    }
+
+    /// The sidebar over the calendar, with a shadow. A peek closes when the pointer leaves it;
+    /// an opened one on a click outside or Esc.
+    fn sidebar_over(&mut self, ctx: &egui::Context, p: &theme::Palette) {
+        let screen = ctx.screen_rect();
+        let rect = Rect::from_min_size(screen.min, Vec2::new(SIDEBAR_W, screen.height()));
+        egui::Area::new("sidebar_overlay".into()).order(egui::Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+            egui::Frame::new().fill(p.sidebar).inner_margin(SIDEBAR_MARGIN).stroke(Stroke::new(1.0_f32, p.line)).shadow(ctx.style().visuals.window_shadow).show(ui, |ui| {
+                ui.set_width(SIDEBAR_W - (SIDEBAR_MARGIN.left + SIDEBAR_MARGIN.right) as f32);
+                ui.set_height(screen.height() - (SIDEBAR_MARGIN.top + SIDEBAR_MARGIN.bottom) as f32);
+                self.sidebar(ui);
+            });
+        });
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let clicked_outside = ctx.input(|i| i.pointer.any_pressed()) && pointer.is_some_and(|pos| !rect.contains(pos)) && self.inspector.is_none() && self.new_event.is_none() && !self.settings_open;
+        let left = self.sidebar_peek && pointer.is_some_and(|pos| pos.x > rect.right() + 24.0) && !ctx.input(|i| i.pointer.any_down());
+        if clicked_outside || left || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.sidebar_overlay = false;
+            self.sidebar_peek = false;
+        }
     }
 
     pub(super) fn calendar_area(&mut self, ui: &mut egui::Ui) {
+        if self.last_view != Some(self.view_mode) {
+            // Entering Month frames the selection's month afresh.
+            self.month_pos = f64::NAN;
+            self.month_target = None;
+            self.last_view = Some(self.view_mode);
+        }
         match self.view_mode {
             ViewMode::Day => self.time_grid(ui, 1),
             ViewMode::Week => self.time_grid(ui, 7),
@@ -53,7 +148,10 @@ impl CalendarCraftApp {
                     (format!("{} – {}", i18n::month_short(s.month()), i18n::month_short(e.month())), e.year().to_string())
                 }
             }
-            ViewMode::Month => (i18n::month_name(d.month()).to_string(), d.year().to_string()),
+            ViewMode::Month => {
+                let m = if self.month_pos.is_nan() { first_of_month(d) } else { self.month_focus };
+                (i18n::month_name(m.month()).to_string(), m.year().to_string())
+            }
             ViewMode::Quarter => {
                 let first = first_of_month(d);
                 let last = super::add_months(first, 2);
@@ -63,51 +161,77 @@ impl CalendarCraftApp {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
+    /// The toolbar. Under 1200px (or when the sidebar leaves it under 900px) the view pills
+    /// become a drop-down; under 760px the search field folds into its icon.
+    fn toolbar(&mut self, ui: &mut egui::Ui, docked: bool) {
         let p = *self.palette();
+        let width = ui.available_width();
+        let screen_w = ui.ctx().screen_rect().width();
+        let compact = screen_w < COMPACT_W || width < 900.0;
+        let tight = width < 760.0;
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = space::S8;
-            if icon_button(ui, &p, "☰", t("Show or hide the sidebar")).clicked() {
-                self.prefs.sidebar = !self.prefs.sidebar;
-                self.mark_changed();
+            if !docked {
+                let tip = if ui.ctx().screen_rect().width() >= DOCK_MIN_W { t("Show the sidebar") } else { t("Sidebar") };
+                if icon_button(ui, &p, Icon::Sidebar, &format!("{tip}  (⌘\\ · Ctrl+\\)")).clicked() {
+                    self.toggle_sidebar(ui.ctx());
+                }
+                ui.add_space(space::S4);
             }
-            ui.add_space(space::S8);
             let (big, small) = self.title_text();
-            ui.label(RichText::new(big).font(font_bold(text::T24)).color(p.text));
+            let size = if tight { text::T18 } else if compact { 20.0 } else { text::T24 };
+            ui.label(RichText::new(big).font(font_bold(size)).color(p.text));
             if !small.is_empty() {
-                ui.label(RichText::new(small).font(font(text::T24)).color(p.text_2));
+                ui.label(RichText::new(small).font(font(size)).color(p.text_2));
             }
             if self.busy > 0 {
                 ui.add(egui::Spinner::new().size(14.0).color(p.primary));
             }
             if let Some(doc) = &self.file_doc {
-                let label = if doc.dirty { format!("{} •", doc.name) } else { doc.name.clone() };
-                pill(ui, &p, &label);
+                if !tight {
+                    let label = if doc.dirty { format!("{} •", doc.name) } else { doc.name.clone() };
+                    pill(ui, &p, &label);
+                }
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = space::S8;
-                if icon_button(ui, &p, "⚙", t("Settings")).clicked() {
+                if icon_button(ui, &p, Icon::Gear, t("Settings")).clicked() {
                     self.settings_open = true;
                 }
-                if theme::primary_button(ui, &p, &format!("+  {}", t("New"))).on_hover_text(t("New event (⌘N)")).clicked() {
+                let new_label = if tight { "+".to_string() } else { format!("+  {}", t("New")) };
+                if theme::primary_button(ui, &p, &new_label).on_hover_text(t("New event (⌘N)")).clicked() {
                     self.open_new_event(self.selected_date, None);
                 }
-                ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text(format!("🔍  {}", t("Search"))).desired_width(170.0).margin(egui::Margin::symmetric(10, 7)));
-                ui.add_space(space::S8);
-                segmented(ui, &p, &mut self.view_mode, &[ViewMode::Day, ViewMode::Week, ViewMode::Month, ViewMode::Quarter, ViewMode::Year]).then(|| {
+                if tight && !self.search_open && self.search_query.is_empty() {
+                    if icon_button(ui, &p, Icon::Search, t("Search")).clicked() {
+                        self.search_open = true;
+                    }
+                } else {
+                    let w = if tight { 120.0 } else { 150.0 };
+                    let search = theme::text_field_padded(ui, &p, egui::TextEdit::singleline(&mut self.search_query).id_salt("search").hint_text(t("Search")).desired_width(w), egui::Margin { left: 34, ..theme::INPUT_PADDING });
+                    icons::paint(ui.painter(), Rect::from_center_size(Pos2::new(search.rect.left() + 18.0, search.rect.center().y), Vec2::splat(14.0)), Icon::Search, p.text_3);
+                    if self.search_open {
+                        search.request_focus();
+                        self.search_open = false;
+                    }
+                }
+                ui.add_space(space::S4);
+                let views = [ViewMode::Day, ViewMode::Week, ViewMode::Month, ViewMode::Quarter, ViewMode::Year];
+                let changed = if compact { view_select(ui, &p, &mut self.view_mode, &views) } else { segmented(ui, &p, &mut self.view_mode, &views) };
+                if changed {
                     self.prefs.view = self.view_mode;
                     self.timeline_scrolled = false;
                     self.mark_changed();
-                });
-                ui.add_space(space::S8);
-                if icon_button(ui, &p, "›", t("Next")).clicked() {
+                }
+                ui.add_space(space::S4);
+                if icon_button(ui, &p, Icon::ChevronRight, t("Next")).clicked() {
                     self.step(1);
                 }
                 if ui.add(egui::Button::new(t("Today")).min_size(Vec2::new(0.0, 32.0))).clicked() {
-                    self.select_date(today());
+                    self.go_today();
                 }
-                if icon_button(ui, &p, "‹", t("Previous")).clicked() {
+                if icon_button(ui, &p, Icon::ChevronLeft, t("Previous")).clicked() {
                     self.step(-1);
                 }
             });
@@ -117,7 +241,23 @@ impl CalendarCraftApp {
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
         let p = *self.palette();
         ui.spacing_mut().item_spacing.y = space::S12;
-        self.quick_entry(ui);
+        // The top row lines up with the toolbar: the toggle where the toolbar shows it when the
+        // sidebar is hidden, then the quick entry; a rule continues the toolbar's bottom edge.
+        let top = ui.max_rect().top() - SIDEBAR_MARGIN.top as f32;
+        let row = ui.horizontal(|ui| {
+            ui.set_height(TOOLBAR_H - 2.0 * SIDEBAR_MARGIN.top as f32);
+            ui.spacing_mut().item_spacing.x = space::S8;
+            if icon_button(ui, &p, Icon::Sidebar, &format!("{}  (⌘\\ · Ctrl+\\)", t("Hide the sidebar"))).clicked() {
+                self.toggle_sidebar(ui.ctx());
+            }
+            self.quick_entry_field(ui);
+        });
+        let rule_y = top + TOOLBAR_H - 0.5;
+        let full = ui.max_rect().expand2(Vec2::new(SIDEBAR_MARGIN.left as f32, 0.0));
+        ui.painter().with_clip_rect(full.expand(1.0)).line_segment([Pos2::new(full.left(), rule_y), Pos2::new(full.right(), rule_y)], Stroke::new(1.0_f32, p.line));
+        let _ = row;
+        ui.add_space(space::S8);
+        self.quick_entry_preview(ui);
         self.mini_calendar(ui, true);
         ui.add_space(space::S4);
         self.calendars_section(ui);
@@ -125,15 +265,16 @@ impl CalendarCraftApp {
         self.agenda(ui, ui.available_height());
     }
 
-    fn quick_entry(&mut self, ui: &mut egui::Ui) {
+    fn quick_entry_field(&mut self, ui: &mut egui::Ui) {
         let p = *self.palette();
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut self.quick_input)
-                .hint_text(t("Lunch with Maya tomorrow at 12:30"))
-                .desired_width(f32::INFINITY)
-                .margin(egui::Margin::symmetric(12, 9)),
-        );
-        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let resp = theme::text_field(ui, &p, egui::TextEdit::singleline(&mut self.quick_input).id_salt("quick").hint_text(t("Lunch with Maya tomorrow at 12:30")).desired_width(f32::INFINITY));
+        self.quick_enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    }
+
+    /// What the quick entry understood, under the field; Enter adds it.
+    fn quick_entry_preview(&mut self, ui: &mut egui::Ui) {
+        let p = *self.palette();
+        let enter = std::mem::take(&mut self.quick_enter);
         if !self.quick_input.trim().is_empty() {
             let cal = self.default_calendar().unwrap_or_default();
             if let Some(parsed) = parse_quick_entry(&self.quick_input, super::today(), &self.store.calendars, &cal).map(|mut q| {
@@ -170,10 +311,10 @@ impl CalendarCraftApp {
                 ui.label(RichText::new(i18n::month_name(month.month())).font(font_bold(text::T16)));
                 ui.label(RichText::new(month.year().to_string()).font(font(text::T16)).color(p.text_2));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if small_icon(ui, &p, "›").clicked() {
+                    if small_icon(ui, &p, Icon::ChevronRight).clicked() {
                         self.mini_month = super::add_months(month, 1);
                     }
-                    if small_icon(ui, &p, "‹").clicked() {
+                    if small_icon(ui, &p, Icon::ChevronLeft).clicked() {
                         self.mini_month = super::add_months(month, -1);
                     }
                 });
@@ -208,7 +349,7 @@ impl CalendarCraftApp {
                     num_color = p.on_primary_strong;
                 } else if selected {
                     painter.circle_filled(center, radius, p.primary_soft);
-                } else if resp.hovered() {
+                } else if resp.hovered() && !ui.input(|i| i.any_touches()) {
                     painter.circle_filled(center, radius, p.hover);
                 }
                 let f = if day == now || selected { font_bold(text::T14) } else { font(text::T14) };
@@ -242,14 +383,15 @@ impl CalendarCraftApp {
     fn calendars_section(&mut self, ui: &mut egui::Ui) {
         let p = *self.palette();
         let header = ui.horizontal(|ui| {
-            let arrow = if self.calendars_open { "⏷" } else { "⏵" };
-            let r = ui.add(egui::Label::new(RichText::new(format!("{arrow}  {}", t("Calendars"))).font(font_bold(text::T14)).color(p.text_2)).sense(Sense::click()));
+            let arrow = if self.calendars_open { Icon::ChevronDown } else { Icon::ChevronRight };
+            let a = icons::inline(ui, arrow, 12.0, p.text_2).interact(Sense::click());
+            let r = ui.add(egui::Label::new(RichText::new(t("Calendars")).font(font_bold(text::T14)).color(p.text_2)).sense(Sense::click())).union(a);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if small_icon(ui, &p, "+").on_hover_text(t("Add a calendar account")).clicked() {
+                if small_icon(ui, &p, Icon::Plus).on_hover_text(t("Add a calendar account")).clicked() {
                     self.settings_open = true;
                     self.settings_tab = 1;
                 }
-                if small_icon(ui, &p, "⟳").on_hover_text(t("Refresh")).clicked() {
+                if small_icon(ui, &p, Icon::Refresh).on_hover_text(t("Refresh")).clicked() {
                     self.refresh_all();
                 }
             });
@@ -288,7 +430,7 @@ impl CalendarCraftApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&acc.name).font(font(text::T12)).color(p.text_2));
                     if let Some(err) = self.status.get(&acc.id) {
-                        ui.label(RichText::new("⚠").color(p.danger)).on_hover_text(err);
+                        icons::inline(ui, Icon::Warning, 14.0, p.danger).on_hover_text(err);
                     }
                 });
                 for cal in cals {
@@ -300,15 +442,14 @@ impl CalendarCraftApp {
                     let box_r = Rect::from_center_size(Pos2::new(rect.left() + 12.0, rect.center().y), Vec2::splat(14.0));
                     if cal.visible {
                         ui.painter().rect_filled(box_r, CornerRadius::same(4), color);
-                        ui.painter().text(box_r.center(), Align2::CENTER_CENTER, "✓", font_bold(10.0), Color32::WHITE);
+                        icons::paint(ui.painter(), box_r.shrink(2.0), Icon::Check, Color32::WHITE);
                     } else {
                         ui.painter().rect_stroke(box_r, CornerRadius::same(4), Stroke::new(1.5_f32, color), egui::StrokeKind::Inside);
                     }
-                    let mut label = cal.name.clone();
+                    let name = ui.painter().text(Pos2::new(rect.left() + 28.0, rect.center().y), Align2::LEFT_CENTER, &cal.name, font(text::T14), p.text);
                     if cal.read_only {
-                        label.push_str("  🔒");
+                        icons::paint(ui.painter(), Rect::from_center_size(Pos2::new(name.right() + 12.0, rect.center().y), Vec2::splat(12.0)), Icon::Lock, p.text_3);
                     }
-                    ui.painter().text(Pos2::new(rect.left() + 28.0, rect.center().y), Align2::LEFT_CENTER, label, font(text::T14), p.text);
                     if resp.clicked() {
                         if let Some(c) = self.store.calendars.iter_mut().find(|c| c.id == cal.id) {
                             c.visible = !c.visible;
@@ -320,18 +461,22 @@ impl CalendarCraftApp {
         });
     }
 
-    /// Days with their events, starting a month before the selection. Scrolling it moves the
-    /// selection (and with it the calendar); selecting elsewhere scrolls it.
+    /// Days with their events around the selection. Scrolling it by hand never changes the
+    /// selection: it only reports the day now at its top (the Month strip follows, the mini
+    /// calendar changes month when that day's month changes). Its rows change only when the
+    /// selection does, so nothing is inserted or removed under a moving finger.
     pub(super) fn agenda(&mut self, ui: &mut egui::Ui, height: f32) {
         let p = *self.palette();
-        if self.selected_date < self.agenda_center - Duration::days(25) || self.selected_date > self.agenda_center + Duration::days(80) {
-            self.agenda_center = self.selected_date;
-            self.agenda_scroll_to = Some(self.selected_date);
-        }
-        let start = self.agenda_center - Duration::days(30);
-        let end = self.agenda_center + Duration::days(90);
-        let now = today();
         let jump = self.agenda_scroll_to.take();
+        let wanted = jump.unwrap_or(self.selected_date);
+        if wanted < self.agenda_center - Duration::days(50) || wanted > self.agenda_center + Duration::days(110) {
+            self.agenda_center = wanted;
+        }
+        let start = self.agenda_center - Duration::days(60);
+        let end = self.agenda_center + Duration::days(120);
+        let now = today();
+        let touching = ui.input(|i| i.any_touches());
+        let mut jumped = false;
         let mut headers: Vec<(NaiveDate, f32)> = Vec::new();
         let mut clicked: Option<(String, Rect)> = None;
         let mut picked_day: Option<NaiveDate> = None;
@@ -340,7 +485,7 @@ impl CalendarCraftApp {
             let mut d = start;
             while d <= end {
                 let events = self.events_on(d);
-                if events.is_empty() && d != now && d != self.selected_date && jump != Some(d) {
+                if events.is_empty() && d != now && d != self.selected_date {
                     d += Duration::days(1);
                     continue;
                 }
@@ -359,16 +504,18 @@ impl CalendarCraftApp {
                         self.open_new_event(d, None);
                     }
                 });
-                let top = head.response.rect.top();
-                headers.push((d, top));
-                if jump == Some(d) {
-                    ui.scroll_to_rect(head.response.rect, Some(Align::TOP));
+                headers.push((d, head.response.rect.top()));
+                if let Some(target) = jump {
+                    if !jumped && d >= target {
+                        ui.scroll_to_rect(head.response.rect, Some(Align::TOP));
+                        jumped = true;
+                    }
                 }
                 if events.is_empty() {
                     ui.label(RichText::new(t("No events")).font(font(text::T12)).color(p.text_3));
                 }
                 for ev in &events {
-                    if let Some(rect) = agenda_row(ui, &p, ev, self.cal_color(&ev.calendar_id), d, self.inspector.as_ref().is_some_and(|i| i.event_id == ev.id)) {
+                    if let Some(rect) = agenda_row(ui, &p, ev, self.cal_color(&ev.calendar_id), d, self.inspector.as_ref().is_some_and(|i| i.event_id == ev.id), !touching) {
                         clicked = Some((ev.id.clone(), rect));
                     }
                 }
@@ -376,16 +523,20 @@ impl CalendarCraftApp {
                 d += Duration::days(1);
             }
         });
-        // The list moved under the user's hand: select the day at its top.
+        // Moved by hand (wheel, trackpad or finger): pass on the day at the top, once per day.
         let offset = out.state.offset.y;
-        let user_scrolled = (offset - self.agenda_offset).abs() > 0.5 && jump.is_none() && ui.rect_contains_pointer(out.inner_rect);
+        let by_hand = (offset - self.agenda_offset).abs() > 0.5 && jump.is_none() && (touching || ui.rect_contains_pointer(out.inner_rect));
         self.agenda_offset = offset;
-        if user_scrolled {
+        if by_hand {
             let top = out.inner_rect.top() + 4.0;
             if let Some((day, _)) = headers.iter().rev().find(|(_, y)| *y <= top).or(headers.first()) {
-                if *day != self.selected_date {
-                    self.selected_date = *day;
-                    self.mini_month = first_of_month(*day);
+                if self.agenda_top != Some(*day) {
+                    self.agenda_top = Some(*day);
+                    self.agenda_moved = Some(*day);
+                    let month = first_of_month(*day);
+                    if month != self.mini_month {
+                        self.mini_month = month;
+                    }
                 }
             }
         }
@@ -404,18 +555,18 @@ impl CalendarCraftApp {
             .frame(egui::Frame::new().fill(p.surface).inner_margin(egui::Margin::symmetric(12, 10)).stroke(Stroke::new(1.0_f32, p.line)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let d = self.selected_date;
+                    let d = if self.view_mode == ViewMode::Day { self.selected_date } else { self.mini_month };
                     ui.label(RichText::new(i18n::month_name(d.month())).font(font_bold(text::T18)));
                     ui.label(RichText::new(d.year().to_string()).font(font(text::T18)).color(p.text_2));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if theme::primary_button(ui, &p, "+").clicked() {
                             self.open_new_event(self.selected_date, None);
                         }
-                        if icon_button(ui, &p, "⚙", t("Settings")).clicked() {
+                        if icon_button(ui, &p, Icon::Gear, t("Settings")).clicked() {
                             self.settings_open = true;
                         }
                         if ui.button(t("Today")).clicked() {
-                            self.select_date(today());
+                            self.go_today();
                         }
                     });
                 });
@@ -432,7 +583,6 @@ impl CalendarCraftApp {
                 sep(ui, &p);
                 self.time_grid(ui, 1);
             } else {
-                self.mini_month = first_of_month(self.selected_date);
                 // Swipe or scroll sideways to change month.
                 let (dx, dy) = ui.input(|i| (i.smooth_scroll_delta.x, i.smooth_scroll_delta.y));
                 let _ = dy;
@@ -484,13 +634,15 @@ impl CalendarCraftApp {
     }
 }
 
-fn agenda_row(ui: &mut egui::Ui, p: &theme::Palette, ev: &CalendarEvent, color: Color32, day: NaiveDate, selected: bool) -> Option<Rect> {
+/// One event in the list. No hover tint while a finger is down (it would chase the rows
+/// sliding under the finger).
+fn agenda_row(ui: &mut egui::Ui, p: &theme::Palette, ev: &CalendarEvent, color: Color32, day: NaiveDate, selected: bool, hover: bool) -> Option<Rect> {
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::click());
     let painter = ui.painter_at(rect);
     if selected {
         painter.rect_filled(rect, CornerRadius::same(8), p.primary_faint);
-    } else if resp.hovered() {
+    } else if hover && resp.hovered() {
         painter.rect_filled(rect, CornerRadius::same(8), p.hover);
     }
     let bar = Rect::from_min_size(Pos2::new(rect.left() + 6.0, rect.top() + 7.0), Vec2::new(3.0, rect.height() - 14.0));
@@ -521,12 +673,12 @@ pub fn sep(ui: &mut egui::Ui, p: &theme::Palette) {
     ui.painter().rect_filled(r, CornerRadius::ZERO, p.line);
 }
 
-pub fn icon_button(ui: &mut egui::Ui, p: &theme::Palette, icon: &str, tip: &str) -> egui::Response {
-    ui.add(egui::Button::new(RichText::new(icon).font(font(text::T16)).color(p.text)).fill(Color32::TRANSPARENT).min_size(Vec2::new(32.0, 32.0))).on_hover_text(tip)
+pub fn icon_button(ui: &mut egui::Ui, p: &theme::Palette, icon: Icon, tip: &str) -> egui::Response {
+    icons::button(ui, p, icon, tip)
 }
 
-pub fn small_icon(ui: &mut egui::Ui, p: &theme::Palette, icon: &str) -> egui::Response {
-    ui.add(egui::Button::new(RichText::new(icon).font(font(text::T14)).color(p.text_2)).fill(Color32::TRANSPARENT).min_size(Vec2::new(24.0, 24.0)))
+pub fn small_icon(ui: &mut egui::Ui, p: &theme::Palette, icon: Icon) -> egui::Response {
+    icons::small_button(ui, p, icon, "")
 }
 
 pub fn pill(ui: &mut egui::Ui, p: &theme::Palette, label: &str) {
@@ -540,8 +692,11 @@ pub fn segmented(ui: &mut egui::Ui, p: &theme::Palette, value: &mut ViewMode, op
     let mut changed = false;
     egui::Frame::new().fill(p.hover).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
+        // Read left to right also inside the toolbar's right-to-left group.
+        let rtl = ui.layout().main_dir() == egui::Direction::RightToLeft;
         ui.horizontal(|ui| {
-            for mode in options {
+            let ordered: Vec<&ViewMode> = if rtl { options.iter().rev().collect() } else { options.iter().collect() };
+            for mode in ordered {
                 let on = *value == *mode;
                 let label = RichText::new(t(mode.label())).font(if on { font_bold(text::T14) } else { font(text::T14) }).color(if on { p.text } else { p.text_2 });
                 let b = egui::Button::new(label).fill(if on { p.surface } else { Color32::TRANSPARENT }).corner_radius(CornerRadius::same(8)).min_size(Vec2::new(0.0, 28.0)).stroke(if on { Stroke::new(1.0_f32, p.line) } else { Stroke::NONE });
@@ -551,6 +706,21 @@ pub fn segmented(ui: &mut egui::Ui, p: &theme::Palette, value: &mut ViewMode, op
                 }
             }
         });
+    });
+    changed
+}
+
+/// The views as a drop-down, for narrow toolbars. Returns true when the choice changed.
+pub fn view_select(ui: &mut egui::Ui, p: &theme::Palette, value: &mut ViewMode, options: &[ViewMode]) -> bool {
+    let mut changed = false;
+    let current = t(value.label());
+    theme::select(ui, p, egui::ComboBox::from_id_salt("view_select").selected_text(RichText::new(current).font(font_bold(text::T14))).width(112.0), |ui| {
+        for mode in options {
+            if ui.selectable_label(*value == *mode, t(mode.label())).clicked() && *value != *mode {
+                *value = *mode;
+                changed = true;
+            }
+        }
     });
     changed
 }

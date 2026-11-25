@@ -1,7 +1,10 @@
 name: Release
 
-# Push a tag such as v0.2.0: the web build becomes calendarcraft-web-0.2.0.zip with
-# SHA256SUMS.txt on a GitHub release, which is what artcraftCloud downloads.
+# Push a tag such as v0.2.1: the web build becomes calendarcraft-web-0.2.1.zip with
+# SHA256SUMS.txt and SHA256SUMS.txt.sig on a GitHub release, which is what
+# artcraftCloud downloads. The .sig is an ed25519 signature over the exact bytes of
+# SHA256SUMS.txt (standard base64, same format as MailCraft); the signing key is the
+# repository secret CALENDARCRAFT_RELEASE_SIGNING_KEY (base64 PKCS#8).
 on:
   push:
     tags: ["v*"]
@@ -24,7 +27,13 @@ jobs:
           curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.22.2/trunk-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin trunk
           sh scripts/package-web.sh
           test "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" = "$GITHUB_REF_NAME"
+      - name: sign checksums
+        env:
+          CALENDARCRAFT_RELEASE_SIGNING_KEY: ${{ secrets.CALENDARCRAFT_RELEASE_SIGNING_KEY }}
+        run: bash scripts/sign-sums.sh dist-release
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist-release/* --title "CalendarCraft $GITHUB_REF_NAME" --notes "Web build for artcraftCloud and the browser."
+        run: |
+          test -f dist-release/SHA256SUMS.txt.sig
+          gh release create "$GITHUB_REF_NAME" dist-release/* --title "CalendarCraft $GITHUB_REF_NAME" --notes "Web build for artcraftCloud and the browser, with SHA256SUMS.txt and an ed25519 signature over it."

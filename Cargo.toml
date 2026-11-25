@@ -1,6 +1,6 @@
 [package]
 name = "calendarcraft"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Clean-room calendar app in Rust for macOS, WebAssembly, and MCP"
 
@@ -39,6 +39,10 @@ wasm-bindgen-futures = "0.4"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Location", "Storage", "Request", "RequestInit", "RequestCredentials", "RequestRedirect", "Response", "Headers", "MessageEvent", "UrlSearchParams", "Navigator", "MediaQueryList"] }
+
+[dev-dependencies]
+# Reads the bundled font in tests/glyphs.rs (already in the tree through egui).
+ab_glyph = "0.2"
 
 [profile.release]
 opt-level = "s"

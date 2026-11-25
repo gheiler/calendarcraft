@@ -6,6 +6,24 @@ use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Timelike};
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Vec2};
 
 use super::{add_months, first_of_month, today, week_start, CalendarCraftApp};
+
+/// Week rows the Month view shows at once.
+const MONTH_ROWS: f32 = 6.0;
+
+/// Monday 5 January 1970, the week counted as row 0 of the Month strip.
+fn epoch_monday() -> NaiveDate {
+    NaiveDate::from_ymd_opt(1970, 1, 5).unwrap_or_default()
+}
+
+/// The row of the week holding `d`.
+pub(super) fn row_of(d: NaiveDate) -> i64 {
+    (week_start(d) - epoch_monday()).num_days().div_euclid(7)
+}
+
+/// The Monday of row `row`.
+pub(super) fn week_of_row(row: i64) -> NaiveDate {
+    epoch_monday() + Duration::days(row * 7)
+}
 use crate::i18n::{self, t};
 use crate::model::{CalendarEvent, ViewMode};
 use crate::theme::{self, font, font_bold, over, text, Palette};
@@ -117,18 +135,26 @@ impl CalendarCraftApp {
         }
     }
 
+    /// Month: weeks on a continuous strip that scrolls by the pixel (wheel, trackpad or drag), as
+    /// in Fantastical. Six rows fill the view; the month owning the middle row is the one named
+    /// in the title, shown in the mini calendar and drawn in full colour. When scrolling stops,
+    /// the strip settles on the nearest week edge.
     pub(super) fn month_view(&mut self, ui: &mut egui::Ui) {
         let p = *self.palette();
         let area = ui.available_rect_before_wrap();
-        ui.allocate_rect(area, Sense::hover());
-        let month = first_of_month(self.selected_date);
-        let first = week_start(month);
-        let last = add_months(month, 1) - Duration::days(1);
-        let rows = (((last - first).num_days() / 7) + 1) as usize;
+        let grid_resp = ui.allocate_rect(area, Sense::drag());
         let head = 34.0;
+        let grid = Rect::from_min_max(Pos2::new(area.left(), area.top() + head), area.max);
         let cell_w = area.width() / 7.0;
-        let cell_h = (area.height() - head) / rows as f32;
+        let cell_h = grid.height() / MONTH_ROWS;
+        self.month_scroll(ui, &grid_resp, grid, cell_h);
+        let month = self.month_focus;
+        let top_row = self.month_pos.floor();
+        let first = week_of_row(top_row as i64);
+        let y0 = grid.top() - (self.month_pos - top_row) as f32 * cell_h;
+        let rows = MONTH_ROWS as usize + 1;
         let painter = ui.painter_at(area);
+        let grid_painter = ui.painter_at(grid);
         let now = today();
 
         for c in 0..7 {
@@ -136,13 +162,12 @@ impl CalendarCraftApp {
             let x = area.left() + cell_w * (c as f32 + 1.0) - 10.0;
             painter.text(Pos2::new(x, area.top() + head * 0.55), Align2::RIGHT_CENTER, i18n::weekday_short(wd).to_uppercase(), font_bold(text::T12), if c >= 5 { p.text_3 } else { p.text_2 });
         }
-        let grid = Rect::from_min_max(Pos2::new(area.left(), area.top() + head), area.max);
         // Backgrounds: weekends shaded, other months greyed, the selection tinted.
         let mut cells: Vec<(NaiveDate, Rect)> = Vec::new();
         for r in 0..rows {
             for c in 0..7 {
                 let d = first + Duration::days((r * 7 + c) as i64);
-                let cell = Rect::from_min_size(Pos2::new(grid.left() + c as f32 * cell_w, grid.top() + r as f32 * cell_h), Vec2::new(cell_w, cell_h));
+                let cell = Rect::from_min_size(Pos2::new(grid.left() + c as f32 * cell_w, y0 + r as f32 * cell_h), Vec2::new(cell_w, cell_h));
                 let fill = if d == self.selected_date {
                     p.primary_faint
                 } else if d.month() != month.month() {
@@ -152,23 +177,28 @@ impl CalendarCraftApp {
                 } else {
                     p.surface
                 };
-                painter.rect_filled(cell, CornerRadius::ZERO, fill);
+                grid_painter.rect_filled(cell, CornerRadius::ZERO, fill);
                 cells.push((d, cell));
             }
         }
         // Shared borders: one line between neighbours.
         let stroke = Stroke::new(1.0_f32, p.line);
+        painter.line_segment([Pos2::new(grid.left(), grid.top() + 0.5), Pos2::new(grid.right(), grid.top() + 0.5)], stroke);
         for r in 0..=rows {
-            let y = (grid.top() + r as f32 * cell_h).round() + 0.5;
-            painter.line_segment([Pos2::new(grid.left(), y), Pos2::new(grid.right(), y)], stroke);
+            let y = (y0 + r as f32 * cell_h).round() + 0.5;
+            grid_painter.line_segment([Pos2::new(grid.left(), y), Pos2::new(grid.right(), y)], stroke);
         }
         for c in 1..7 {
             let x = (grid.left() + c as f32 * cell_w).round() + 0.5;
-            painter.line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], stroke);
+            grid_painter.line_segment([Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())], stroke);
         }
-        // Clicks on days (registered before the events so events win).
+        // Clicks on days (registered before the events so events win); only the visible part.
         for (d, cell) in &cells {
-            let r = ui.interact(*cell, ui.id().with(("mday", *d)), Sense::click());
+            let visible = cell.intersect(grid);
+            if visible.height() < 4.0 {
+                continue;
+            }
+            let r = ui.interact(visible, ui.id().with(("mday", *d)), Sense::click());
             if r.clicked() {
                 self.select_date(*d);
             }
@@ -182,14 +212,14 @@ impl CalendarCraftApp {
             let in_month = d.month() == month.month();
             let label = if d.day() == 1 { format!("{} {}", d.day(), i18n::month_short(d.month())) } else { d.day().to_string() };
             if *d == now {
-                let galley = painter.layout_no_wrap(label.clone(), font_bold(text::T14), p.on_primary_strong);
+                let galley = grid_painter.layout_no_wrap(label.clone(), font_bold(text::T14), p.on_primary_strong);
                 let w = galley.size().x.max(14.0) + 12.0;
                 let pill = Rect::from_center_size(Pos2::new(pos.x - w / 2.0 + 4.0, pos.y), Vec2::new(w, 24.0));
-                painter.rect_filled(pill, CornerRadius::same(12), p.primary_strong);
-                painter.text(pill.center(), Align2::CENTER_CENTER, label, font_bold(text::T14), p.on_primary_strong);
+                grid_painter.rect_filled(pill, CornerRadius::same(12), p.primary_strong);
+                grid_painter.text(pill.center(), Align2::CENTER_CENTER, label, font_bold(text::T14), p.on_primary_strong);
             } else {
                 let col = if in_month { p.text } else { p.text_3 };
-                painter.text(pos, Align2::RIGHT_CENTER, label, if d.day() == 1 { font_bold(text::T14) } else { font(text::T14) }, col);
+                grid_painter.text(pos, Align2::RIGHT_CENTER, label, if d.day() == 1 { font_bold(text::T14) } else { font(text::T14) }, col);
             }
         }
         // Events.
@@ -198,10 +228,14 @@ impl CalendarCraftApp {
         let max_lines = (((cell_h - top_pad - 4.0) / line_h).floor() as usize).max(1);
         let selected_id = self.inspector.as_ref().map(|i| i.event_id.clone());
         let mut clicked: Option<(String, Rect)> = None;
+        let hit = |ui: &egui::Ui, rect: Rect, id: egui::Id| -> bool {
+            let visible = rect.intersect(grid);
+            visible.height() > 2.0 && ui.interact(visible, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+        };
         for r in 0..rows {
             let ws = first + Duration::days((r * 7) as i64);
             let (spans, lanes_per_day) = week_spans(self, ws, 7);
-            let row_top = grid.top() + r as f32 * cell_h + top_pad;
+            let row_top = y0 + r as f32 * cell_h + top_pad;
             let mut hidden = [0usize; 7];
             for s in &spans {
                 if s.lane + 1 > max_lines || (s.lane + 1 == max_lines && (s.first..=s.last).any(|c| lanes_per_day[c] + timed(self, ws + Duration::days(c as i64)).len() > max_lines)) {
@@ -215,8 +249,8 @@ impl CalendarCraftApp {
                     Pos2::new(grid.left() + (s.last + 1) as f32 * cell_w - 4.0, row_top + s.lane as f32 * line_h + line_h - 2.0),
                 );
                 let color = self.cal_color(&s.ev.calendar_id);
-                draw_bar(&painter, &p, rect, color, &s.ev.title, text::T12, selected_id.as_deref() == Some(s.ev.id.as_str()));
-                if ui.interact(rect, ui.id().with(("mspan", &s.ev.id, r)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                draw_bar(&grid_painter, &p, rect, color, &s.ev.title, text::T12, selected_id.as_deref() == Some(s.ev.id.as_str()));
+                if hit(ui, rect, ui.id().with(("mspan", &s.ev.id, ws))) {
                     clicked = Some((s.ev.id.clone(), rect));
                 }
             }
@@ -231,8 +265,8 @@ impl CalendarCraftApp {
                     let y = row_top + (used + k) as f32 * line_h;
                     let rect = Rect::from_min_max(Pos2::new(grid.left() + c as f32 * cell_w + 4.0, y + 1.0), Pos2::new(grid.left() + (c + 1) as f32 * cell_w - 4.0, y + line_h - 2.0));
                     let color = self.cal_color(&ev.calendar_id);
-                    draw_line(&painter, &p, rect, color, ev, text::T12, selected_id.as_deref() == Some(ev.id.as_str()), cell_w > 120.0);
-                    if ui.interact(rect, ui.id().with(("mline", &ev.id, d)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    draw_line(&grid_painter, &p, rect, color, ev, text::T12, selected_id.as_deref() == Some(ev.id.as_str()), cell_w > 120.0);
+                    if hit(ui, rect, ui.id().with(("mline", &ev.id, d))) {
                         clicked = Some((ev.id.clone(), rect));
                     }
                 }
@@ -240,8 +274,8 @@ impl CalendarCraftApp {
                 if more > 0 {
                     let y = row_top + (max_lines - 1) as f32 * line_h;
                     let rect = Rect::from_min_size(Pos2::new(grid.left() + c as f32 * cell_w + 4.0, y), Vec2::new(cell_w - 8.0, line_h));
-                    painter.text(Pos2::new(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, format!("+{more} {}", t("more")), font_bold(text::T12), p.text_2);
-                    if ui.interact(rect, ui.id().with(("more", d)), Sense::click()).clicked() {
+                    grid_painter.text(Pos2::new(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, format!("+{more} {}", t("more")), font_bold(text::T12), p.text_2);
+                    if hit(ui, rect, ui.id().with(("more", d))) {
                         self.select_date(d);
                         self.set_view(ViewMode::Day);
                     }
@@ -251,7 +285,82 @@ impl CalendarCraftApp {
         if let Some((id, rect)) = clicked {
             self.open_inspector(&id, Some(rect));
         }
-        self.wheel(ui, grid, Some(7));
+    }
+
+    /// Move the month strip: wheel and trackpad by the pixel, a drag by the pointer, a new
+    /// selection or a scrolled list by an eased glide; settle on a week edge when input stops.
+    /// Only a change of the focused month or top week is passed on, so the other panes are not
+    /// touched while the strip moves within a week.
+    fn month_scroll(&mut self, ui: &egui::Ui, resp: &egui::Response, grid: Rect, cell_h: f32) {
+        let now = ui.input(|i| i.time);
+        let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.1) as f64;
+        let row_h = cell_h.max(1.0) as f64;
+        if self.month_pos.is_nan() {
+            self.month_pos = row_of(week_start(first_of_month(self.selected_date))) as f64;
+            self.month_synced = self.selected_date;
+            self.month_focus = first_of_month(self.selected_date);
+        }
+        // A selection made elsewhere (Today, arrows, the mini calendar, the list): another month
+        // is framed from its first week; a day of this month is brought into view.
+        if self.selected_date != self.month_synced {
+            self.month_synced = self.selected_date;
+            let row = row_of(self.selected_date) as f64;
+            if first_of_month(self.selected_date) != self.month_focus {
+                self.month_target = Some(row_of(week_start(first_of_month(self.selected_date))) as f64);
+            } else if row < self.month_pos || row + 1.0 > self.month_pos + MONTH_ROWS as f64 {
+                self.month_target = Some(if row < self.month_pos { row } else { row + 1.0 - MONTH_ROWS as f64 });
+            }
+        }
+        // The list on the left was scrolled by hand: keep its first day in view.
+        if let Some(day) = self.agenda_moved.take() {
+            let row = row_of(day) as f64;
+            if row < self.month_pos.floor() || row + 1.0 > self.month_pos + MONTH_ROWS as f64 {
+                self.month_target = Some(row);
+            }
+        }
+        let busy = self.inspector.is_some() || self.new_event.is_some() || self.settings_open;
+        let mut moved = 0.0_f64;
+        if !busy && ui.rect_contains_pointer(grid) {
+            let dy = ui.input(|i| i.smooth_scroll_delta.y) as f64;
+            if dy != 0.0 {
+                moved -= dy / row_h;
+            }
+        }
+        if resp.dragged() {
+            moved -= resp.drag_delta().y as f64 / row_h;
+        }
+        if moved != 0.0 {
+            self.month_pos += moved;
+            self.month_target = None;
+            self.month_input_at = now;
+            self.month_settle = true;
+        } else if self.month_settle && !resp.dragged() && now - self.month_input_at > 0.16 {
+            self.month_settle = false;
+            self.month_target = Some(self.month_pos.round());
+        }
+        if let Some(target) = self.month_target {
+            let k = if self.reduced_motion() { 1.0 } else { 1.0 - (-dt * 14.0).exp() };
+            self.month_pos += (target - self.month_pos) * k;
+            if (target - self.month_pos).abs() * row_h < 0.5 {
+                self.month_pos = target;
+                self.month_target = None;
+            }
+        }
+        if self.month_target.is_some() || self.month_settle {
+            ui.ctx().request_repaint();
+        }
+        // The month owning the middle of the view; the top week for the list.
+        let middle = week_of_row((self.month_pos + MONTH_ROWS as f64 / 2.0).floor() as i64) + Duration::days(3);
+        let focus = first_of_month(middle);
+        if focus != self.month_focus {
+            self.month_focus = focus;
+            self.mini_month = focus;
+        }
+        let top = week_of_row(self.month_pos.round() as i64);
+        if moved != 0.0 && top != self.month_top_week {
+            self.agenda_scroll_to = Some(top);
+        }
+        self.month_top_week = top;
     }
 
     /// Three months side by side in one grid (Fantastical's Quarter): every month gets six week
@@ -613,5 +722,26 @@ impl CalendarCraftApp {
         if let Some((id, rect)) = clicked {
             self.open_inspector(&id, Some(rect));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn month_rows_count_weeks_from_a_monday() {
+        let d = NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+        let row = row_of(d);
+        assert_eq!(week_of_row(row), week_start(d));
+        assert_eq!(week_of_row(row + 1), week_start(d) + Duration::days(7));
+        // Every day of a week shares its row; the next Monday starts the next one.
+        for k in 0..7 {
+            assert_eq!(row_of(week_start(d) + Duration::days(k)), row);
+        }
+        assert_eq!(row_of(week_start(d) + Duration::days(7)), row + 1);
+        // Before 1970 too.
+        let old = NaiveDate::from_ymd_opt(1969, 12, 31).unwrap();
+        assert_eq!(week_of_row(row_of(old)), week_start(old));
     }
 }

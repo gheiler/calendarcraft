@@ -8,9 +8,11 @@
   <link data-trunk rel="icon" href="../assets/icon.png" />
   <link data-trunk rel="rust" href="../Cargo.toml" data-bin="calendarcraft" data-wasm-opt="z" />
   <style>
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #ffffff; }
+    /* The app draws and scrolls everything itself: no page panning, rubber-banding, pull-to-refresh
+       or double-tap zoom under it (each would resize or move the canvas mid-scroll). */
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; background: #ffffff; }
     @media (prefers-color-scheme: dark) { html, body { background: #262626; } }
-    #calendarcraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; }
+    #calendarcraft_canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; touch-action: none; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
     #loading { position: absolute; inset: 0; display: grid; place-items: center; font: 14px/20px -apple-system, "Inter", system-ui, sans-serif; color: #00000066; }
   </style>
 </head>

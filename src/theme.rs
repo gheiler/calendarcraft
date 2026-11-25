@@ -289,3 +289,64 @@ pub fn event_text(color: Color32, p: &Palette) -> Color32 {
 pub fn event_fill(color: Color32, p: &Palette) -> Color32 {
     over(color, if p.dark { 70 } else { 56 }, p.surface)
 }
+
+/// SnowUI input metrics: 12px side and 8px top/bottom padding, 36px high, 8px corners.
+pub const INPUT_PADDING: Margin = Margin { left: 12, right: 12, top: 8, bottom: 8 };
+pub const INPUT_HEIGHT: f32 = 36.0;
+
+fn input_stroke(p: &Palette, focused: bool, hovered: bool) -> Stroke {
+    if focused {
+        Stroke::new(1.5_f32, p.primary)
+    } else if hovered {
+        Stroke::new(1.0_f32, p.text_3)
+    } else {
+        Stroke::new(1.0_f32, p.line)
+    }
+}
+
+/// A text field in the SnowUI input style (any single- or multi-line `TextEdit`). The frame is
+/// drawn here, under the text, so every field gets the same padding, border and focus ring.
+pub fn text_field(ui: &mut egui::Ui, p: &Palette, edit: egui::TextEdit<'_>) -> egui::Response {
+    text_field_padded(ui, p, edit, INPUT_PADDING)
+}
+
+/// `text_field` with other padding (room for an icon inside the field).
+pub fn text_field_padded(ui: &mut egui::Ui, p: &Palette, edit: egui::TextEdit<'_>, padding: Margin) -> egui::Response {
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let mut r = ui.add(edit.frame(false).margin(padding).min_size(egui::vec2(0.0, INPUT_HEIGHT)));
+    // egui reports the text's rect, inside the padding; the field is the outer one.
+    r.rect += padding;
+    let fill = if r.enabled() { p.surface } else { p.hover };
+    let shape = egui::epaint::RectShape::new(r.rect, CornerRadius::same(8), fill, input_stroke(p, r.has_focus(), r.hovered()), egui::StrokeKind::Inside);
+    ui.painter().set(bg, shape);
+    r
+}
+
+/// A drop-down in the same style as `text_field`; the list itself keeps the menu style.
+pub fn select<R>(ui: &mut egui::Ui, p: &Palette, combo: egui::ComboBox, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<Option<R>> {
+    let menu_style = ui.style().clone();
+    ui.scope(|ui| {
+        let s = ui.style_mut();
+        s.spacing.button_padding = egui::vec2(INPUT_PADDING.left as f32, INPUT_PADDING.top as f32);
+        s.spacing.interact_size.y = INPUT_HEIGHT;
+        let w = &mut s.visuals.widgets;
+        for (state, hovered, open) in [(&mut w.inactive, false, false), (&mut w.hovered, true, false), (&mut w.active, true, false), (&mut w.open, false, true)] {
+            state.bg_fill = p.surface;
+            state.weak_bg_fill = p.surface;
+            state.bg_stroke = input_stroke(p, open, hovered);
+            state.expansion = 0.0;
+        }
+        let combo = combo.icon(|ui, rect, visuals, _open, _side| {
+            // A chevron, like the other icons, instead of egui's filled triangle.
+            let c = rect.center();
+            let w = rect.width().min(12.0) / 2.0;
+            let pts = vec![c + egui::vec2(-w, -w / 2.0), c + egui::vec2(0.0, w / 2.0), c + egui::vec2(w, -w / 2.0)];
+            ui.painter().add(egui::epaint::PathShape::line(pts, Stroke::new(1.5_f32, visuals.fg_stroke.color)));
+        });
+        combo.show_ui(ui, |ui| {
+            ui.set_style(menu_style);
+            add_contents(ui)
+        })
+    })
+    .inner
+}

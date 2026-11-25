@@ -57,6 +57,14 @@ mod native_cli {
         #[arg(long)]
         pub new_event: bool,
 
+        /// Open Settings on a tab: general or accounts (for screenshots)
+        #[arg(long)]
+        pub settings: Option<String>,
+
+        /// Show (1) or hide (0) the sidebar
+        #[arg(long)]
+        pub sidebar: Option<u8>,
+
         /// Window size in points, e.g. 1320x840 (390x844 shows the phone layout)
         #[arg(long)]
         pub size: Option<String>,
@@ -165,6 +173,8 @@ mod native_cli {
             new_event: args.new_event,
             demo: args.demo,
             language: args.lang.clone(),
+            settings: args.settings.as_deref().map(|t| u8::from(t == "accounts")),
+            sidebar: args.sidebar.map(|v| v != 0),
         };
         eframe::run_native("CalendarCraft", options, Box::new(move |_cc| Ok(Box::new(CalendarCraftApp::new(store, launch)))))
     }

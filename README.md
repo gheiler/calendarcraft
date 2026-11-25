@@ -19,8 +19,15 @@ understands sentences ("Dinner with Ada friday 7pm at Osteria"), and runs inside
   aligned month by month and tinted by how busy each day is.
 - **Sidebar:** a sentence box with a live preview, a full-width mini calendar with one or two dots
   per day (in the colours of that day's calendars), calendar sets and calendars, and an agenda that
-  scrolls with the calendar both ways (scroll the agenda and the day at the top is selected; pick a
-  day anywhere and the agenda scrolls to it).
+  scrolls with the calendar both ways (scrolling the agenda moves the mini calendar and the month
+  grid along; pick a day anywhere and the agenda scrolls to it).
+- **Month scrolls continuously:** wheel, trackpad or drag moves the weeks by the pixel and settles on
+  a week row when you let go; the title, the mini calendar and the agenda follow.
+- **Sidebar:** the sidebar button (or ⌘\ / Ctrl+\) hides and shows it. Hidden, the same button
+  sits at the start of the toolbar, and resting the pointer on the left edge peeks the sidebar
+  over the calendar. Below 1000 px wide the sidebar always opens over the calendar; below
+  1200 px the view switcher becomes a menu.
+- **Keys:** N or C new event, T today, ←/→ previous and next, ⌘\ or Ctrl+\ sidebar.
 - **Events:** click an event for a popover inspector (calendar, all-day, date and times, location,
   link, alert, repeat, notes, delete); double-click an empty slot or day, press **N** (or **C**, or
   ⌘N in the desktop app) for the new-event dialog. Sentences fill in the dialog as you type.
@@ -39,14 +46,16 @@ understands sentences ("Dinner with Ada friday 7pm at Osteria"), and runs inside
 ```sh
 cargo run --release                       # desktop app
 cargo run --release -- --view quarter --theme dark --date 2026-11-24
+cargo run --release -- --settings general --sidebar 0   # open Settings, start with the sidebar hidden
 cargo run --release -- --demo --screenshot shot.png --size 1440x900   # draws, saves, exits
 cargo test                                # unit + integration tests
 trunk serve                               # browser build on http://127.0.0.1:8095
 sh scripts/package-web.sh                 # dist-release/calendarcraft-web-<version>.zip + SHA256SUMS.txt
+# A version tag (vX.Y.Z) also writes SHA256SUMS.txt.sig (ed25519). See docs/releasing.md.
 ```
 
 The browser build takes `?view=`, `?theme=`, `?date=`, `?lang=`, `?demo=1` (sample calendars),
-`?open=<event id>` and `?new=1`. `scripts/screenshots.cjs` takes the screenshots above from a
+`?open=<event id>`, `?new=1`, `?settings=general|accounts` and `?sidebar=0|1`. `scripts/screenshots.cjs` takes the screenshots above from a
 served build (puppeteer-core and Chrome).
 
 A live CalDAV round trip: `CALDAV_TEST_URL=https://server/dav/cal/me/ CALDAV_TEST_USER=…
