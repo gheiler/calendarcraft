@@ -65,6 +65,7 @@ fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: T
     // Widths below are the text inside a field; the SnowUI padding adds 24px to each.
     let pad = (theme::INPUT_PADDING.left + theme::INPUT_PADDING.right) as f32;
     let label_w = 70.0;
+    let col_w = (ui.available_width() - label_w - space::S12).max(100.0);
     let field_w = (ui.available_width() - label_w - space::S12 - 16.0).clamp(100.0, 244.0) - pad;
     ui.add_enabled_ui(editable, |ui| {
         egui::Grid::new(ui.id().with("fields")).num_columns(2).spacing([space::S12, space::S8]).min_col_width(label_w).show(ui, |ui| {
@@ -86,17 +87,32 @@ fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: T
             ui.end_row();
 
             field_label(ui, p, t("Date"));
-            ui.horizontal(|ui| {
-                let time_w = 44.0;
-                let times = if ev.all_day { 0.0 } else { (time_w + pad) * 2.0 + 3.0 * space::S8 + 8.0 };
-                let date_w = 110.0_f32.min((field_w + pad - times - pad).max(72.0));
+            // 110 and 56 match the original fields, so "12:00" stays readable. The
+            // painted field is desired_width plus padding; when that row is wider
+            // than the column, the times go under the date instead of being squeezed.
+            let date_w = 110.0;
+            let time_w = 56.0;
+            let row_needed = date_w + pad + space::S8 + (time_w + pad) * 2.0 + 3.0 * space::S8 + 8.0;
+            let stack = !ev.all_day && col_w < row_needed;
+            if stack {
                 changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.date).desired_width(date_w).hint_text("2026-11-24")).changed();
-                if !ev.all_day {
+                ui.end_row();
+                field_label(ui, p, "");
+                ui.horizontal(|ui| {
                     changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.start).desired_width(time_w).hint_text("09:00")).changed();
                     ui.label("–");
                     changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.end).desired_width(time_w).hint_text("10:00")).changed();
-                }
-            });
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.date).desired_width(date_w).hint_text("2026-11-24")).changed();
+                    if !ev.all_day {
+                        changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.start).desired_width(time_w).hint_text("09:00")).changed();
+                        ui.label("–");
+                        changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.end).desired_width(time_w).hint_text("10:00")).changed();
+                    }
+                });
+            }
             ui.end_row();
 
             if ev.all_day {
@@ -238,8 +254,9 @@ impl CalendarCraftApp {
         let Some(mut ins) = self.inspector.take() else { return };
         let screen = ctx.screen_rect();
         let mobile = self.is_mobile(ctx);
-        // A full-width bottom sheet on a phone; a 360px popover on the desktop.
-        let width = if mobile { screen.width() } else { 360.0_f32.min(screen.width() - 16.0).max(200.0) };
+        // A full-width bottom sheet on a phone; 460px on the desktop so the date
+        // and both times fit on one row at their full size.
+        let width = if mobile { screen.width() } else { 460.0_f32.min(screen.width() - 16.0).max(200.0) };
         let max_h = if mobile { (screen.height() * 0.92).min(screen.height() - 8.0) } else { (screen.height() - 16.0).min(560.0) };
         let sheet_h = self.popup_sizes.get("inspector").map(|s| s.y.min(max_h)).unwrap_or_else(|| if mobile { (screen.height() * 0.6).min(max_h) } else { max_h });
         let editable = self.calendar_writable(&ins.draft.calendar_id) && !ins.draft.locked;
@@ -258,6 +275,7 @@ impl CalendarCraftApp {
         let mut save = false;
         let mut delete = false;
         let mut error: Option<String> = None;
+        let mut body_size: Option<Vec2> = None;
         let area = egui::Area::new("inspector".into()).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
             let corner = if mobile { CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 } } else { CornerRadius::same(16) };
             egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.line)).corner_radius(corner).shadow(ctx.style().visuals.window_shadow).inner_margin(egui::Margin::same(20)).show(ui, |ui| {
@@ -285,7 +303,8 @@ impl CalendarCraftApp {
                 });
                 // Keep the title and close button visible; scroll the fields when the sheet is tall.
                 let body_h = (max_h - 72.0).max(80.0);
-                egui::ScrollArea::vertical().max_height(body_h).show(ui, |ui| {
+                let content_h = self.popup_sizes.get("inspector_body").map(|s| s.y).unwrap_or(body_h);
+                let scroll = egui::ScrollArea::vertical().max_height(body_h).min_scrolled_height(content_h.min(body_h)).show(ui, |ui| {
                     set_dialog_width(ui, inner);
                     ui.label(RichText::new(describe_when(&ins.draft)).font(font(text::T14)).color(p.text_2));
                     if !editable {
@@ -326,10 +345,14 @@ impl CalendarCraftApp {
                         });
                     });
                 });
+                body_size = Some(scroll.content_size);
             });
         });
         // A click elsewhere closes it (not the click that opened it).
         self.settle(ctx, "inspector", area.response.rect.size());
+        if let Some(size) = body_size {
+            self.settle(ctx, "inspector_body", size);
+        }
         let outside = ctx.input(|i| i.pointer.any_pressed()) && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|pt| !area.response.rect.contains(pt)) && ins.anchor.is_none_or(|a| !a.contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default()));
         if save {
             let mut ev = ins.draft.clone();
@@ -436,12 +459,13 @@ impl CalendarCraftApp {
         let mut add = false;
         let mut cancel = false;
         let screen = ctx.screen_rect();
-        let content_w = dialog_content_width(screen.width(), 440.0, DIALOG_PAD);
+        let content_w = dialog_content_width(screen.width(), 500.0, DIALOG_PAD);
         let max_h = dialog_max_body_height(screen.height(), 2.0 * DIALOG_PAD + 36.0);
         let modal = egui::Modal::new("new_event".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
             set_dialog_width(ui, content_w);
             ui.label(RichText::new(t("New event")).font(font_bold(text::T18)));
-            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+            let content_h = self.popup_sizes.get("new_event_body").map(|s| s.y).unwrap_or(max_h);
+            let scroll = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(content_h.min(max_h)).show(ui, |ui| {
             set_dialog_width(ui, content_w);
             ui.add_space(space::S4);
             let r = theme::text_field(ui, p, egui::TextEdit::singleline(&mut ne.sentence).hint_text(t("Type it: Dinner with Ada friday 7pm at Osteria")).desired_width(f32::INFINITY));
@@ -489,8 +513,10 @@ impl CalendarCraftApp {
                 }
             });
             });
+            scroll.content_size
         });
         self.settle(ctx, "new_event", modal.response.rect.size());
+        self.settle(ctx, "new_event_body", modal.inner);
         if modal.should_close() {
             cancel = true;
         }

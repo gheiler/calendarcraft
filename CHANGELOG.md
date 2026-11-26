@@ -11,6 +11,7 @@
   (empty keeps the saved one) without removing it; calendars and colours stay attached.
 - Phones: the search icon sits next to Day/Month and opens a focused field. Event details, new
   event, Settings, delete, file conflict and migration dialogs fit the screen and scroll.
+- Start and end times stay readable (no more clipped "12:00"); on a phone they move under the date.
 - Long account addresses are cut with "…" (full address on hover) instead of running under
   the buttons.
 
