@@ -11,6 +11,7 @@ understands sentences ("Dinner with Ada friday 7pm at Osteria"), and runs inside
 |---|---|
 | ![Quarter](docs/screenshots/quarter-light.png) | ![Year, dark](docs/screenshots/year-dark.png) |
 | ![Event inspector](docs/screenshots/inspector-light.png) | ![New event, dark](docs/screenshots/new-event-dark.png) |
+| ![Search](docs/screenshots/search-light.png) | ![Month, dark](docs/screenshots/month-dark.png) |
 
 ## What it does
 
