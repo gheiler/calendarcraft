@@ -201,6 +201,7 @@ impl CalendarCraftApp {
             let r = ui.interact(visible, ui.id().with(("mday", *d)), Sense::click());
             if r.clicked() {
                 self.select_date(*d);
+                self.selected_event = None;
             }
             if r.double_clicked() {
                 self.open_new_event(*d, None);
@@ -226,11 +227,16 @@ impl CalendarCraftApp {
         let line_h = 21.0;
         let top_pad = 30.0;
         let max_lines = (((cell_h - top_pad - 4.0) / line_h).floor() as usize).max(1);
-        let selected_id = self.inspector.as_ref().map(|i| i.event_id.clone());
-        let mut clicked: Option<(String, Rect)> = None;
-        let hit = |ui: &egui::Ui, rect: Rect, id: egui::Id| -> bool {
+        let selected_id = self.highlighted_event();
+        let mut clicked: Option<(String, Rect, bool)> = None;
+        // Some(double-clicked) when clicked.
+        let hit = |ui: &egui::Ui, rect: Rect, id: egui::Id| -> Option<bool> {
             let visible = rect.intersect(grid);
-            visible.height() > 2.0 && ui.interact(visible, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+            if visible.height() <= 2.0 {
+                return None;
+            }
+            let r = ui.interact(visible, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            (r.clicked() || r.double_clicked()).then(|| r.double_clicked())
         };
         for r in 0..rows {
             let ws = first + Duration::days((r * 7) as i64);
@@ -250,8 +256,8 @@ impl CalendarCraftApp {
                 );
                 let color = self.cal_color(&s.ev.calendar_id);
                 draw_bar(&grid_painter, &p, rect, color, &s.ev.title, text::T12, selected_id.as_deref() == Some(s.ev.id.as_str()));
-                if hit(ui, rect, ui.id().with(("mspan", &s.ev.id, ws))) {
-                    clicked = Some((s.ev.id.clone(), rect));
+                if let Some(double) = hit(ui, rect, ui.id().with(("mspan", &s.ev.id, ws))) {
+                    clicked = Some((s.ev.id.clone(), rect, double));
                 }
             }
             for c in 0..7 {
@@ -266,8 +272,8 @@ impl CalendarCraftApp {
                     let rect = Rect::from_min_max(Pos2::new(grid.left() + c as f32 * cell_w + 4.0, y + 1.0), Pos2::new(grid.left() + (c + 1) as f32 * cell_w - 4.0, y + line_h - 2.0));
                     let color = self.cal_color(&ev.calendar_id);
                     draw_line(&grid_painter, &p, rect, color, ev, text::T12, selected_id.as_deref() == Some(ev.id.as_str()), cell_w > 120.0);
-                    if hit(ui, rect, ui.id().with(("mline", &ev.id, d))) {
-                        clicked = Some((ev.id.clone(), rect));
+                    if let Some(double) = hit(ui, rect, ui.id().with(("mline", &ev.id, d))) {
+                        clicked = Some((ev.id.clone(), rect, double));
                     }
                 }
                 let more = items.len() - show + hidden[c];
@@ -275,15 +281,15 @@ impl CalendarCraftApp {
                     let y = row_top + (max_lines - 1) as f32 * line_h;
                     let rect = Rect::from_min_size(Pos2::new(grid.left() + c as f32 * cell_w + 4.0, y), Vec2::new(cell_w - 8.0, line_h));
                     grid_painter.text(Pos2::new(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, format!("+{more} {}", t("more")), font_bold(text::T12), p.text_2);
-                    if hit(ui, rect, ui.id().with(("more", d))) {
+                    if hit(ui, rect, ui.id().with(("more", d))).is_some() {
                         self.select_date(d);
                         self.set_view(ViewMode::Day);
                     }
                 }
             }
         }
-        if let Some((id, rect)) = clicked {
-            self.open_inspector(&id, Some(rect));
+        if let Some((id, rect, double)) = clicked {
+            self.click_event(&id, rect, double);
         }
     }
 
@@ -379,8 +385,8 @@ impl CalendarCraftApp {
         let cell_h = (area.height() - title_h - head_h) / rows as f32;
         let now = today();
         let stroke = Stroke::new(1.0_f32, p.line);
-        let selected_id = self.inspector.as_ref().map(|i| i.event_id.clone());
-        let mut clicked: Option<(String, Rect)> = None;
+        let selected_id = self.highlighted_event();
+        let mut clicked: Option<(String, Rect, bool)> = None;
         let line_h = 18.0;
         let max_lines = ((cell_h - 26.0) / line_h).floor() as usize;
         for m in 0..3 {
@@ -414,6 +420,7 @@ impl CalendarCraftApp {
                     let resp = ui.interact(cell, ui.id().with(("qday", d, m)), Sense::click());
                     if resp.clicked() {
                         self.select_date(d);
+                        self.selected_event = None;
                     }
                     if resp.double_clicked() {
                         self.open_new_event(d, None);
@@ -448,8 +455,9 @@ impl CalendarCraftApp {
                         } else {
                             draw_line(&painter, &p, rect, color, ev, 11.0, sel, false);
                         }
-                        if ui.interact(rect, ui.id().with(("qev", &ev.id, d)), Sense::click()).clicked() {
-                            clicked = Some((ev.id.clone(), rect));
+                        let r = ui.interact(rect, ui.id().with(("qev", &ev.id, d)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if r.clicked() || r.double_clicked() {
+                            clicked = Some((ev.id.clone(), rect, r.double_clicked()));
                         }
                     }
                     if overflow {
@@ -472,8 +480,8 @@ impl CalendarCraftApp {
                 painter.line_segment([Pos2::new(x, area.top()), Pos2::new(x, area.bottom())], Stroke::new(1.5_f32, over(p.text, 40, p.surface)));
             }
         }
-        if let Some((id, rect)) = clicked {
-            self.open_inspector(&id, Some(rect));
+        if let Some((id, rect, double)) = clicked {
+            self.click_event(&id, rect, double);
         }
         self.wheel(ui, area, None);
     }
@@ -556,8 +564,8 @@ impl CalendarCraftApp {
         let width = ui.available_width();
         let col_w = (width - gutter) / days as f32;
         let now = today();
-        let selected_id = self.inspector.as_ref().map(|i| i.event_id.clone());
-        let mut clicked: Option<(String, Rect)> = None;
+        let selected_id = self.highlighted_event();
+        let mut clicked: Option<(String, Rect, bool)> = None;
 
         // Day headers.
         if days > 1 || !self.is_mobile(ui.ctx()) {
@@ -592,6 +600,17 @@ impl CalendarCraftApp {
             let painter = ui.painter_at(all_rect);
             painter.text(Pos2::new(all_rect.left() + gutter - 8.0, all_rect.top() + 14.0), Align2::RIGHT_CENTER, t("all-day"), font(11.0), p.text_2);
             painter.line_segment([Pos2::new(all_rect.left(), all_rect.bottom() - 0.5), Pos2::new(all_rect.right(), all_rect.bottom() - 0.5)], Stroke::new(1.0_f32, p.line));
+            // Day cells first so the event bars on top of them get the clicks (as in Month).
+            for i in 0..days {
+                let d = start + Duration::days(i as i64);
+                let cell = Rect::from_min_size(Pos2::new(all_rect.left() + gutter + col_w * i as f32, all_rect.top()), Vec2::new(col_w, all_h));
+                let r = ui.interact(cell, ui.id().with(("aday", d)), Sense::click());
+                if r.double_clicked() {
+                    self.open_new_event(d, None);
+                } else if r.clicked() {
+                    self.selected_event = None;
+                }
+            }
             for s in &spans {
                 let rect = Rect::from_min_max(
                     Pos2::new(all_rect.left() + gutter + s.first as f32 * col_w + 3.0, all_rect.top() + 4.0 + s.lane as f32 * lane_h),
@@ -599,15 +618,9 @@ impl CalendarCraftApp {
                 );
                 let color = self.cal_color(&s.ev.calendar_id);
                 draw_bar(&painter, &p, rect, color, &s.ev.title, text::T12, selected_id.as_deref() == Some(s.ev.id.as_str()));
-                if ui.interact(rect, ui.id().with(("aspan", &s.ev.id)), Sense::click()).clicked() {
-                    clicked = Some((s.ev.id.clone(), rect));
-                }
-            }
-            for i in 0..days {
-                let d = start + Duration::days(i as i64);
-                let cell = Rect::from_min_size(Pos2::new(all_rect.left() + gutter + col_w * i as f32, all_rect.top()), Vec2::new(col_w, all_h));
-                if ui.interact(cell, ui.id().with(("aday", d)), Sense::click()).double_clicked() {
-                    self.open_new_event(d, None);
+                let r = ui.interact(rect, ui.id().with(("aspan", &s.ev.id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                if r.clicked() || r.double_clicked() {
+                    clicked = Some((s.ev.id.clone(), rect, r.double_clicked()));
                 }
             }
         }
@@ -649,6 +662,7 @@ impl CalendarCraftApp {
                     }
                 } else if r.clicked() {
                     self.select_date(d);
+                    self.selected_event = None;
                 }
                 // Overlapping events share the column.
                 let mut items = timed(self, d);
@@ -698,13 +712,14 @@ impl CalendarCraftApp {
                             (Some(a), None) => a.format("%H:%M").to_string(),
                             _ => String::new(),
                         };
-                        if let Some(l) = ev.location.as_ref().filter(|l| !l.is_empty()) {
-                            sub = format!("{sub} · {l}");
+                        if let Some(l) = ev.location.as_ref().filter(|l| !l.trim().is_empty()) {
+                            sub = format!("{sub} · {}", super::side::one_line(l));
                         }
                         clip.text(Pos2::new(rect.left() + 9.0, rect.top() + 27.0), Align2::LEFT_CENTER, sub, font(11.0), txt);
                     }
-                    if ui.interact(rect, ui.id().with(("tev", &ev.id, d)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        clicked = Some((ev.id.clone(), rect));
+                    let r = ui.interact(rect, ui.id().with(("tev", &ev.id, d)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if r.clicked() || r.double_clicked() {
+                        clicked = Some((ev.id.clone(), rect, r.double_clicked()));
                     }
                 }
                 if d == now {
@@ -719,8 +734,8 @@ impl CalendarCraftApp {
         if let Some((d, t)) = new_at {
             self.open_new_event(d, Some(t));
         }
-        if let Some((id, rect)) = clicked {
-            self.open_inspector(&id, Some(rect));
+        if let Some((id, rect, double)) = clicked {
+            self.click_event(&id, rect, double);
         }
     }
 }

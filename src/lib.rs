@@ -3,6 +3,8 @@
 pub mod caldav;
 pub mod filesync;
 pub mod host;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod icon;
 pub mod i18n;
 pub mod ics;
 pub mod mcp;
@@ -24,8 +26,8 @@ use wasm_bindgen::prelude::*;
 
 /// WebAssembly entry point. Page parameters: `?host=parent` (framed by a host that speaks the
 /// craft-web-host bridge), `view=month|quarter|…`, `theme=light|dark|system`, `date=2026-11-24`,
-/// `demo=1` (sample data), `lang=de`, `open=<event id>`, `new=1`, `settings=general|accounts`,
-/// `sidebar=0|1`.
+/// `demo=1` (sample data), `lang=de`, `open=<event id>`, `select=<event id>`, `delete=1`,
+/// `new=1`, `settings=general|accounts`, `sidebar=0|1`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn wasm_start() -> Result<(), JsValue> {
@@ -37,6 +39,8 @@ pub fn wasm_start() -> Result<(), JsValue> {
         demo: query("demo").is_some(),
         language: query("lang"),
         open_event: query("open"),
+        select_event: query("select"),
+        confirm_delete: query("delete").is_some(),
         new_event: query("new").is_some(),
         settings: query("settings").map(|t| u8::from(t == "accounts" || t == "1")),
         sidebar: query("sidebar").map(|v| v != "0"),

@@ -21,6 +21,8 @@ pub enum Icon {
     Lock,
     Check,
     Plus,
+    /// A circled "i": more about an error.
+    Info,
 }
 
 /// Draw `icon` centred in `rect` (its 16×16 design box scaled to fit).
@@ -78,6 +80,11 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.add(PathShape::line(pts, stroke));
             // The arrowhead at the open end, pointing up.
             painter.add(PathShape::line(vec![end + Vec2::new(-3.2, 0.4) * s, end, end + Vec2::new(0.3, -3.2) * s], stroke));
+        }
+        Icon::Info => {
+            painter.circle_stroke(pt(8.0, 8.0), 6.5 * s, stroke);
+            line(&[(8.0, 7.2), (8.0, 11.5)]);
+            painter.circle_filled(pt(8.0, 4.9), 0.9 * s, color);
         }
         Icon::Warning => {
             painter.add(PathShape::closed_line(vec![pt(8.0, 2.0), pt(14.5, 13.5), pt(1.5, 13.5)], stroke));
