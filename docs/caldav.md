@@ -16,7 +16,12 @@
    (`current-user-privilege-set` without write) and multi-event resources are locked.
 3. **Writing.** A new event is `PUT <calendar>/<uid>.ics` with `If-None-Match: *`; a change is a
    `PUT` with `If-Match: <etag>`; a delete is `DELETE` with `If-Match`. On `412` the calendar is
-   read again.
+   read again (the rejected local event is replaced by the server's version, with a message).
+   Mail-backed calendars in artcraftCloud are this CalDAV path (Stalwart), not JMAP. Two tabs
+   editing the same event already conflict at the event resource; CalendarCraft does not show the
+   three-way *Reload theirs / Keep mine / Save a copy* dialog used for file-backed calendars,
+   because each event is its own `.ics` on the server and a reload is cheap. The later save is
+   refused and the calendar is re-read.
 4. **Feeds.** An `.ics` URL (or `webcal://`) is fetched with `GET` and shown read-only.
 
 On the desktop requests go straight to the server (`ureq`). In the browser they go through

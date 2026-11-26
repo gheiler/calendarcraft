@@ -2,6 +2,7 @@
 //! calendar, calendars, the day-by-day list) and the calendar (Day, Week, Month, Quarter, Year),
 //! event details in a popover and new events in a dialog. Narrow windows get a phone layout.
 
+mod files;
 mod icons;
 mod popups;
 mod side;
@@ -80,6 +81,9 @@ pub struct FileDoc {
     pub account_id: String,
     pub calendar_id: String,
     pub dirty: bool,
+    /// Drive path (file id) when the host opened an existing file; none for Untitled.
+    pub path: Option<String>,
+    pub etag: Option<String>,
 }
 
 /// The details popover.
@@ -153,6 +157,15 @@ pub struct CalendarCraftApp {
     pub host: HostConfig,
     pub secrets: BTreeMap<String, String>,
     pub file_doc: Option<FileDoc>,
+    /// File-backed calendars in a host, keyed by calendar id, referenced by drive path.
+    pub file_cals: HashMap<String, files::FileCal>,
+    pending_files: HashMap<String, files::PendingFile>,
+    next_file_req: u64,
+    pub file_conflict: Option<files::FileConflict>,
+    pub migration: Option<files::MigrationNotice>,
+    last_file_sync: f64,
+    last_file_autosave: f64,
+    file_sync_requested: bool,
     loaded: HashMap<String, (NaiveDate, NaiveDate)>,
 
     /// The mini calendar's month (follows the selection unless paged).
@@ -242,7 +255,7 @@ impl CalendarCraftApp {
                     .extend(cache.into_iter().filter(|e| !known.contains(&e.id)));
             }
         }
-        store.accounts.retain(|a| a.kind != AccountKind::File);
+        Self::drop_ephemeral_file_accounts(&mut store);
         // Passwords are loaded in first_frame (and a leftover plaintext file is migrated then).
         let secrets: BTreeMap<String, String> = BTreeMap::new();
         let view_mode = launch.view.unwrap_or(prefs.view);
@@ -282,6 +295,14 @@ impl CalendarCraftApp {
             host: host_cfg,
             secrets,
             file_doc: None,
+            file_cals: HashMap::new(),
+            pending_files: HashMap::new(),
+            next_file_req: 0,
+            file_conflict: None,
+            migration: None,
+            last_file_sync: 0.0,
+            last_file_autosave: 0.0,
+            file_sync_requested: false,
             loaded: HashMap::new(),
             mini_month: first_of_month(anchor),
             agenda_scroll_to: Some(anchor),
@@ -550,12 +571,7 @@ impl CalendarCraftApp {
     }
 
     fn mark_doc_dirty(&mut self, cal_id: &str) {
-        if let Some(doc) = self.file_doc.as_mut() {
-            if doc.calendar_id == cal_id && !doc.dirty {
-                doc.dirty = true;
-                host::post_dirty(true);
-            }
-        }
+        self.mark_file_dirty(cal_id);
     }
 
     fn push_put(&mut self, ev: &CalendarEvent) {
@@ -687,6 +703,27 @@ impl CalendarCraftApp {
         else {
             return;
         };
+        if acc.kind == AccountKind::File {
+            let ids: Vec<String> = self
+                .file_cals
+                .values()
+                .filter(|f| {
+                    self.store
+                        .calendars
+                        .iter()
+                        .any(|c| c.id == f.calendar_id && c.account_id == acc.id)
+                })
+                .map(|f| f.calendar_id.clone())
+                .collect();
+            if ids.is_empty() {
+                self.request_file_sync(true);
+            } else {
+                for id in ids {
+                    self.request_file_load(&id);
+                }
+            }
+            return;
+        }
         let (Some(ep), Some(inbox)) = (self.endpoint(&acc), self.inbox.clone()) else {
             return;
         };
@@ -743,12 +780,13 @@ impl CalendarCraftApp {
             read_only: true,
             url: acc.server_url.clone(),
             ctag: None,
+            ..Default::default()
         });
         self.add_to_all_set(&id);
         id
     }
 
-    fn add_to_all_set(&mut self, cal_id: &str) {
+    pub(super) fn add_to_all_set(&mut self, cal_id: &str) {
         for set in &mut self.store.calendar_sets {
             if set.id == "set_all" && !set.calendar_ids.iter().any(|c| c == cal_id) {
                 set.calendar_ids.push(cal_id.to_string());
@@ -867,6 +905,7 @@ impl CalendarCraftApp {
                                 read_only: rc.read_only,
                                 url: Some(rc.url.clone()),
                                 ctag: rc.ctag.clone(),
+                                ..Default::default()
                             });
                             self.add_to_all_set(&id);
                         }
@@ -969,6 +1008,7 @@ impl CalendarCraftApp {
                     for c in cals {
                         self.load_events(&c);
                     }
+                    self.flash(t("This event changed on the server and was reloaded."), true);
                 }
             }
         }
@@ -1129,175 +1169,19 @@ impl CalendarCraftApp {
         self.dirty_store = true;
     }
 
-    pub fn add_local_calendar(&mut self, name: &str) {
-        if !self.store.accounts.iter().any(|a| a.id == "acc_local") {
-            self.store.accounts.push(AccountConfig {
-                id: "acc_local".into(),
-                name: t("On this device").into(),
-                provider: "Local".into(),
-                enabled: true,
-                kind: AccountKind::Local,
-                ..Default::default()
-            });
-        }
-        let id = format!(
-            "cal_local_{}",
-            ics::short_hash(&format!("{name}{}", self.store.calendars.len()))
-        );
-        let color = self.next_color();
-        self.store.calendars.push(CalendarSource {
-            id: id.clone(),
-            account_id: "acc_local".into(),
-            name: name.to_string(),
-            color_hex: color,
-            visible: true,
-            ..Default::default()
-        });
-        self.add_to_all_set(&id);
-        self.dirty_store = true;
-    }
-
     // -----------------------------------------------------------------------------------------
     // The host's document
-
-    fn open_document(&mut self, name: String, bytes: Vec<u8>) {
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        let acc_id = "acc_file".to_string();
-        let cal_id = "cal_file".to_string();
-        let parsed = if text.trim().is_empty() {
-            Ok(ics::IcsCalendar::default())
-        } else {
-            ics::parse(&text, &cal_id)
-        };
-        match parsed {
-            Ok(cal) => {
-                self.store.events.retain(|e| e.calendar_id != cal_id);
-                self.store.calendars.retain(|c| c.id != cal_id);
-                self.store.accounts.retain(|a| a.id != acc_id);
-                self.store.accounts.insert(
-                    0,
-                    AccountConfig {
-                        id: acc_id.clone(),
-                        name: name.clone(),
-                        provider: t("File").into(),
-                        enabled: true,
-                        kind: AccountKind::File,
-                        ..Default::default()
-                    },
-                );
-                let color = cal
-                    .color
-                    .as_deref()
-                    .and_then(crate::caldav::normalize_color)
-                    .unwrap_or_else(|| "#B899EB".into());
-                let display = cal
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| name.trim_end_matches(".ics").to_string());
-                self.store.calendars.insert(
-                    0,
-                    CalendarSource {
-                        id: cal_id.clone(),
-                        account_id: acc_id.clone(),
-                        name: display,
-                        color_hex: color,
-                        visible: true,
-                        ..Default::default()
-                    },
-                );
-                self.add_to_all_set(&cal_id);
-                let first = cal
-                    .events
-                    .iter()
-                    .map(|e| e.date)
-                    .filter(|d| *d >= today())
-                    .min()
-                    .or_else(|| cal.events.iter().map(|e| e.date).max());
-                let count = cal.events.len();
-                self.store.events.extend(cal.events);
-                self.file_doc = Some(FileDoc {
-                    name: name.clone(),
-                    account_id: acc_id,
-                    calendar_id: cal_id,
-                    dirty: false,
-                });
-                if let Some(day) = first {
-                    self.select_date(day);
-                }
-                self.flash(
-                    format!(
-                        "{name}: {count} {}",
-                        t(if count == 1 { "event" } else { "events" })
-                    ),
-                    false,
-                );
-            }
-            Err(err) => {
-                host::post_failed(&err);
-                self.flash(format!("{name}: {err}"), true);
-            }
-        }
-    }
-
-    /// `file.save`: send the document back to the host.
-    pub fn save_document(&mut self) {
-        let Some(doc) = self.file_doc.clone() else {
-            return;
-        };
-        let cal_name = self
-            .store
-            .calendar_by_id(&doc.calendar_id)
-            .map(|c| c.name.clone());
-        let events: Vec<&CalendarEvent> = self
-            .store
-            .events
-            .iter()
-            .filter(|e| e.calendar_id == doc.calendar_id)
-            .collect();
-        let text = ics::write_calendar(cal_name.as_deref(), events);
-        host::post_save(&doc.name, text.as_bytes());
-        if let Some(d) = self.file_doc.as_mut() {
-            d.dirty = false;
-        }
-        host::post_dirty(false);
-    }
-
-    fn handle_host(&mut self, msg: HostMsg) {
-        match msg {
-            HostMsg::Open { name, bytes } => self.open_document(name, bytes),
-            HostMsg::Command(cmd, args) => match cmd.as_str() {
-                "file.save" => self.save_document(),
-                "view.today" => self.select_date(today()),
-                "sync.refresh" => self.refresh_all(),
-                "event.new" => self.open_new_event(self.selected_date, None),
-                "calendar.subscribe" => {
-                    let field = |k: &str| {
-                        args.get(k)
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string()
-                    };
-                    self.account_form = AccountForm {
-                        kind_ics: true,
-                        url: field("url"),
-                        name: field("name"),
-                        ..Default::default()
-                    };
-                    self.add_account_from_form();
-                    if let Some(err) = self.account_form.error.take() {
-                        self.flash(err, true);
-                    }
-                }
-                _ => {}
-            },
-        }
-    }
 
     // -----------------------------------------------------------------------------------------
     // Saving options and data
 
     /// `window.calendarcraft.state`: the calendars and the events around the selected day.
     fn publish_state(&mut self) {
+        let files_sig = (self.file_cals.len() as u64)
+            .wrapping_mul(17)
+            .wrapping_add(self.file_cals.values().filter(|f| f.dirty).count() as u64)
+            .wrapping_add(self.file_conflict.is_some() as u64 * 31)
+            .wrapping_add(self.migration.as_ref().map(|m| m.pending + m.saved.len()).unwrap_or(0) as u64);
         let sig = self.store.events.iter().fold(
             (self.store.calendars.len() as u64) << 32 | self.busy as u64,
             |acc, e| {
@@ -1305,7 +1189,7 @@ impl CalendarCraftApp {
                     e.title.len() as u64 + e.date.num_days_from_ce() as u64 + e.id.len() as u64,
                 )
             },
-        ) ^ self.selected_date.num_days_from_ce() as u64;
+        ) ^ self.selected_date.num_days_from_ce() as u64 ^ files_sig;
         if sig == self.published {
             return;
         }
@@ -1330,12 +1214,16 @@ impl CalendarCraftApp {
             .iter()
             .map(|c| serde_json::json!({"id": c.id, "name": c.name, "account": c.account_id}))
             .collect();
+        let files = self.file_state_json();
         let state = serde_json::json!({
             "date": self.selected_date.to_string(),
             "busy": self.busy,
             "calendars": calendars,
             "events": events,
             "errors": self.status,
+            "fileCalendars": files.get("fileCalendars").cloned().unwrap_or(serde_json::json!([])),
+            "conflict": files.get("conflict").cloned().unwrap_or(serde_json::Value::Null),
+            "migration": files.get("migration").cloned().unwrap_or(serde_json::Value::Null),
         });
         host::publish_state(&state.to_string());
     }
@@ -1370,11 +1258,22 @@ impl CalendarCraftApp {
             })
             .map(|c| c.id.clone())
             .collect();
+        let file_cals: Vec<String> = self
+            .store
+            .calendars
+            .iter()
+            .filter(|c| crate::filesync::is_file_backed(c) || c.account_id == "acc_file")
+            .map(|c| c.id.clone())
+            .collect();
         let mut keep = self.store.clone();
-        keep.accounts.retain(|a| a.kind != AccountKind::File);
-        keep.calendars.retain(|c| c.account_id != "acc_file");
+        // Keep file-backed calendar *references* (path / etag), not their events or an Untitled doc.
+        keep.accounts.retain(|a| {
+            a.kind != AccountKind::File
+                || keep.calendars.iter().any(|c| c.account_id == a.id && crate::filesync::is_file_backed(c))
+        });
+        keep.calendars.retain(|c| crate::filesync::is_file_backed(c) || (c.account_id != "acc_file" && c.id != "cal_file"));
         keep.events
-            .retain(|e| e.calendar_id != "cal_file" && !server_cals.contains(&e.calendar_id));
+            .retain(|e| !file_cals.contains(&e.calendar_id) && !server_cals.contains(&e.calendar_id));
         if let Ok(json) = serde_json::to_string(&keep) {
             host::save(host::KEY_STORE, &json);
         }
@@ -1485,6 +1384,7 @@ impl CalendarCraftApp {
             self.settings_open = true;
             self.settings_tab = tab;
         }
+        self.start_host_file_setup();
     }
 
     pub fn is_mobile(&self, ctx: &egui::Context) -> bool {
@@ -1634,7 +1534,7 @@ impl eframe::App for CalendarCraftApp {
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default();
         for m in host_msgs {
-            self.handle_host(m);
+            self.handle_host_msg(m);
         }
         if self.banner.is_some() && self.now > self.banner_until {
             self.banner = None;
@@ -1648,6 +1548,17 @@ impl eframe::App for CalendarCraftApp {
             self.desktop_layout(ctx);
         }
         self.popups(ctx);
+        if host::hosted() {
+            if self.file_sync_requested {
+                self.file_sync_requested = false;
+                self.request_file_sync(true);
+            } else {
+                self.request_file_sync(false);
+            }
+            self.maybe_autosave_files();
+            let interval = crate::filesync::sync_interval_secs(self.store.settings.file_sync_interval_secs);
+            ctx.request_repaint_after(std::time::Duration::from_secs(interval as u64));
+        }
         self.publish_state();
         self.persist();
         if self.dirty_store {

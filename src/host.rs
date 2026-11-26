@@ -47,14 +47,37 @@ pub struct HostUser {
     pub email: String,
 }
 
+/// The host's answer to a `calendarcraft:file` request (create, read, stat, write).
+#[derive(Debug, Clone, Default)]
+pub struct FileReply {
+    pub request_id: String,
+    pub ok: bool,
+    pub conflict: bool,
+    pub path: Option<String>,
+    pub name: Option<String>,
+    pub etag: Option<String>,
+    pub bytes: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
 /// Messages from the host.
 #[derive(Debug, Clone)]
 pub enum HostMsg {
-    /// `calendarcraft:open`: a document to show.
-    Open { name: String, bytes: Vec<u8> },
+    /// `calendarcraft:open`: a document to show. `path` and `etag` are set when the host opened
+    /// an existing drive file.
+    Open {
+        name: String,
+        bytes: Vec<u8>,
+        path: Option<String>,
+        etag: Option<String>,
+    },
     /// `window.calendarcraft.execute(command, args)`, e.g. `file.save` for the host's autosave,
     /// or `calendar.subscribe` with `{ url, name }`.
     Command(String, serde_json::Value),
+    /// `calendarcraft:file-result`: create / read / stat / write of a drive file.
+    File(FileReply),
+    /// The window became visible or focused: check file-backed calendars.
+    SyncHint,
 }
 
 pub type HostInbox = Arc<Mutex<Vec<HostMsg>>>;
@@ -246,17 +269,54 @@ mod bridge {
                 .ok()
                 .and_then(|v| v.as_string())
                 .unwrap_or_default();
-            if ty == "calendarcraft:open" {
-                let name = js_sys::Reflect::get(&data, &"name".into())
+            let field = |data: &wasm_bindgen::JsValue, key: &str| {
+                js_sys::Reflect::get(data, &key.into())
                     .ok()
                     .and_then(|v| v.as_string())
-                    .unwrap_or_else(|| "Calendar.ics".into());
+                    .filter(|s| !s.is_empty())
+            };
+            if ty == "calendarcraft:open" {
+                let name = field(&data, "name").unwrap_or_else(|| "Calendar.ics".into());
+                let path = field(&data, "path");
+                let etag = field(&data, "etag");
                 let bytes = js_sys::Reflect::get(&data, &"bytes".into())
                     .ok()
                     .map(|b| js_sys::Uint8Array::new(&b).to_vec())
                     .unwrap_or_default();
                 if let Ok(mut q) = inbox2.lock() {
-                    q.push(HostMsg::Open { name, bytes });
+                    q.push(HostMsg::Open {
+                        name,
+                        bytes,
+                        path,
+                        etag,
+                    });
+                }
+                wake2();
+            } else if ty == "calendarcraft:file-result" {
+                let request_id = field(&data, "requestId").unwrap_or_default();
+                let ok = js_sys::Reflect::get(&data, &"ok".into())
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let conflict = js_sys::Reflect::get(&data, &"conflict".into())
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let bytes = js_sys::Reflect::get(&data, &"bytes".into())
+                    .ok()
+                    .filter(|b| !b.is_undefined() && !b.is_null())
+                    .map(|b| js_sys::Uint8Array::new(&b).to_vec());
+                if let Ok(mut q) = inbox2.lock() {
+                    q.push(HostMsg::File(FileReply {
+                        request_id,
+                        ok,
+                        conflict,
+                        path: field(&data, "path"),
+                        name: field(&data, "name"),
+                        etag: field(&data, "etag"),
+                        bytes,
+                        error: field(&data, "error"),
+                    }));
                 }
                 wake2();
             }
@@ -291,6 +351,44 @@ mod bridge {
         execute.forget();
         let _ = js_sys::Reflect::set(&window, &"calendarcraft".into(), &api);
     }
+
+    pub fn install_sync_hint(inbox: HostInbox, wake: Arc<dyn Fn() + Send + Sync>) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let notify: Arc<dyn Fn()> = {
+            let inbox = inbox.clone();
+            let wake = wake.clone();
+            Arc::new(move || {
+                if let Ok(mut q) = inbox.lock() {
+                    q.push(HostMsg::SyncHint);
+                }
+                wake();
+            })
+        };
+        if let Some(document) = window.document() {
+            let notify2 = notify.clone();
+            let doc2 = document.clone();
+            let on_vis = Closure::wrap(Box::new(move || {
+                let state = js_sys::Reflect::get(&doc2, &"visibilityState".into())
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                if state == "visible" {
+                    notify2();
+                }
+            }) as Box<dyn FnMut()>);
+            let _ = document
+                .add_event_listener_with_callback("visibilitychange", on_vis.as_ref().unchecked_ref());
+            on_vis.forget();
+        }
+        let on_focus = Closure::wrap(Box::new(move || {
+            notify();
+        }) as Box<dyn FnMut()>);
+        let _ = window.add_event_listener_with_callback("focus", on_focus.as_ref().unchecked_ref());
+        on_focus.forget();
+    }
+
 }
 
 /// What the app shows, as JSON in `window.calendarcraft.state`, for hosts, agents and tests.
@@ -314,9 +412,10 @@ pub fn publish_state(json: &str) {
 pub fn start_bridge(inbox: HostInbox, wake: Arc<dyn Fn() + Send + Sync>) {
     #[cfg(target_arch = "wasm32")]
     {
-        bridge::install(inbox, wake);
+        bridge::install(inbox.clone(), wake.clone());
         if hosted() {
             bridge::post("calendarcraft:ready", &[], None);
+            bridge::install_sync_hint(inbox, wake);
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -353,4 +452,50 @@ pub fn post_failed(error: &str) {
     bridge::post("calendarcraft:failed", &[("error", error.into())], None);
     #[cfg(not(target_arch = "wasm32"))]
     let _ = error;
+}
+
+/// Ask the host to create, read, stat or write a drive file. The answer comes back as
+/// [`HostMsg::File`].
+pub fn post_file(
+    op: &str,
+    request_id: &str,
+    path: Option<&str>,
+    name: Option<&str>,
+    folder: Option<&str>,
+    bytes: Option<&[u8]>,
+    if_match: Option<&str>,
+) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut fields: Vec<(&str, wasm_bindgen::JsValue)> = vec![
+            ("op", op.into()),
+            ("requestId", request_id.into()),
+        ];
+        if let Some(path) = path {
+            fields.push(("path", path.into()));
+        }
+        if let Some(name) = name {
+            fields.push(("name", name.into()));
+        }
+        if let Some(folder) = folder {
+            fields.push(("folder", folder.into()));
+        }
+        if let Some(tag) = if_match {
+            fields.push(("ifMatch", tag.into()));
+        }
+        let transfer = bytes.map(|b| {
+            let arr = js_sys::Uint8Array::from(b);
+            arr.buffer()
+        });
+        if let Some(buf) = &transfer {
+            fields.push(("bytes", buf.clone().into()));
+            bridge::post("calendarcraft:file", &fields, Some(buf));
+        } else {
+            bridge::post("calendarcraft:file", &fields, None);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (op, request_id, path, name, folder, bytes, if_match);
+    }
 }

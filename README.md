@@ -37,7 +37,7 @@ understands sentences ("Dinner with Ada friday 7pm at Osteria"), and runs inside
   32 px high), follows the system theme unless set.
 - **Languages:** English, Deutsch, Español, Français, Italiano, Português (Brasil).
 - **Accounts:** CalDAV (iCloud, Fastmail, Nextcloud, Stalwart, any RFC 4791 server), `.ics` feeds
-  (read only), local calendars, and `.ics` files. See [docs/accounts.md](docs/accounts.md).
+  (read only), local calendars (standalone) or `.ics` files in the host's drive (artcraftCloud), and opened `.ics` files. See [docs/accounts.md](docs/accounts.md).
 - **MCP server** (`calendarcraft --mcp` or `calendarcraft-mcp`): list, create and parse events
   for an agent.
 
@@ -66,7 +66,7 @@ CALDAV_TEST_PASS=… cargo test --test caldav_live`.
 | | desktop | browser |
 |---|---|---|
 | options | `~/Library/Application Support/CalendarCraft/calendarcraft.ui.json` | `localStorage["calendarcraft.ui"]` |
-| accounts, local calendars | `…/calendarcraft.store.json` | `calendarcraft.store` |
+| accounts, local calendars (standalone) or file-id references (in a host) | `…/calendarcraft.store.json` | `calendarcraft.store` |
 | account passwords | macOS Keychain, Windows Credential Manager or Linux Secret Service (service `CalendarCraft`) | standalone: ciphertext in `localStorage["calendarcraft.secrets"]`, key in IndexedDB; inside artcraftCloud: sealed on the server |
 | copy of server events | `…/calendarcraft.cache.json` | `calendarcraft.cache` |
 
@@ -75,12 +75,14 @@ CALDAV_TEST_PASS=… cargo test --test caldav_live`.
 ## In a host (artcraftCloud and other Craft hosts)
 
 CalendarCraft's browser build speaks the `craft-web-host` contract when framed with
-`?host=parent`: it posts `calendarcraft:ready`, opens what `calendarcraft:open {name, bytes}`
+`?host=parent`: it posts `calendarcraft:ready`, opens what `calendarcraft:open {name, bytes, path?, etag?}`
 hands it (an `.ics` file shows as its own calendar), and sends `calendarcraft:save` and
-`calendarcraft:dirty`. The page API is `window.calendarcraft.execute(command, args)` with
-`file.save`, `sync.refresh`, `view.today`, `event.new` and `calendar.subscribe {url, name}`;
-`window.calendarcraft.state` is a JSON snapshot of the calendars and the events around the
-selected day.
+`calendarcraft:dirty`. File-backed calendars in the drive use `calendarcraft:file` (`create`,
+`read`, `stat`, `write` with `ifMatch`) and `calendarcraft:file-result`. The page API is
+`window.calendarcraft.execute(command, args)` with `file.save`, `sync.refresh`, `view.today`,
+`event.new`, `calendar.subscribe {url, name}`, `calendar.create {name}`, `calendar.syncFiles`
+and `calendar.resolveConflict {choice}`; `window.calendarcraft.state` is a JSON snapshot of the
+calendars, the events around the selected day, `fileCalendars`, and any file conflict.
 
 A host can name accounts before the app starts:
 

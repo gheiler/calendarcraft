@@ -7,6 +7,8 @@ use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rec
 use super::icons::Icon;
 use super::side::{icon_button, segmented};
 use super::{parse_hhmm, today, AccountForm, CalendarCraftApp, Inspector, NewEvent};
+use crate::filesync::{self, ConflictChoice};
+use crate::host;
 use crate::i18n::{self, t};
 use crate::mcp::handle_mcp_request;
 use crate::model::{AccountKind, CalendarEvent, CalendarSource, ViewMode};
@@ -182,6 +184,8 @@ impl CalendarCraftApp {
         self.inspector_popover(ctx, &p);
         self.new_event_dialog(ctx, &p);
         self.settings_dialog(ctx, &p);
+        self.file_conflict_dialog(ctx, &p);
+        self.migration_dialog(ctx, &p);
         if let Some((msg, error)) = self.banner.clone() {
             egui::Area::new("toast".into()).order(egui::Order::Tooltip).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -24.0)).show(ctx, |ui| {
                 egui::Frame::new().fill(if error { p.danger } else { p.text }).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::symmetric(16, 10)).shadow(ctx.style().visuals.popup_shadow).show(ui, |ui| {
@@ -488,6 +492,18 @@ impl CalendarCraftApp {
                 }
             });
             ui.end_row();
+            if host::hosted() {
+                field_label(ui, p, t("Check files every"));
+                let mut mins = (filesync::sync_interval_secs(self.store.settings.file_sync_interval_secs) / 60).max(1);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::DragValue::new(&mut mins).range(1..=30)).changed() {
+                        self.store.settings.file_sync_interval_secs = mins * 60;
+                        self.mark_changed();
+                    }
+                    ui.label(t("minutes"));
+                });
+                ui.end_row();
+            }
         });
     }
 
@@ -502,6 +518,7 @@ impl CalendarCraftApp {
                             AccountKind::Caldav if acc.host_managed => t("CalDAV · provided by artcraftCloud"),
                             AccountKind::Caldav => "CalDAV",
                             AccountKind::Ics => t("Subscription (read only)"),
+                            AccountKind::File if acc.id == filesync::ACC_FILES => t("In my files"),
                             AccountKind::File => t("Opened file"),
                             AccountKind::Local => t("On this device"),
                         };
@@ -512,10 +529,10 @@ impl CalendarCraftApp {
                         }
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if !acc.host_managed && acc.kind != AccountKind::File && ui.add(egui::Button::new(RichText::new(t("Remove")).color(p.danger))).clicked() {
+                        if !acc.host_managed && ui.add(egui::Button::new(RichText::new(t("Remove")).color(p.danger))).clicked() {
                             self.remove_account(&acc.id);
                         }
-                        if matches!(acc.kind, AccountKind::Caldav | AccountKind::Ics) && ui.button(t("Refresh")).clicked() {
+                        if matches!(acc.kind, AccountKind::Caldav | AccountKind::Ics | AccountKind::File) && ui.button(t("Refresh")).clicked() {
                             self.refresh_account(&acc.id);
                         }
                     });
@@ -561,7 +578,8 @@ impl CalendarCraftApp {
             self.add_account_from_form();
         }
         ui.add_space(space::S12);
-        ui.label(RichText::new(t("Calendar on this device")).font(font_bold(text::T16)));
+        let local_heading = if host::hosted() { t("Calendar in my files") } else { t("Calendar on this device") };
+        ui.label(RichText::new(local_heading).font(font_bold(text::T16)));
         ui.horizontal(|ui| {
             let id = ui.id().with("localname");
             let mut name: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
@@ -590,6 +608,60 @@ impl CalendarCraftApp {
         }
         if !self.mcp_response.is_empty() {
             theme::text_field(ui, p, egui::TextEdit::multiline(&mut self.mcp_response).code_editor().desired_rows(7).desired_width(f32::INFINITY));
+        }
+    }
+
+    fn file_conflict_dialog(&mut self, ctx: &egui::Context, p: &Palette) {
+        if self.file_conflict.is_none() {
+            return;
+        }
+        let name = self.file_conflict.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+        let modal = egui::Modal::new("file_conflict".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.label(RichText::new(t("Someone else changed this calendar. Choose how to continue.")).font(font_bold(text::T16)));
+            ui.add_space(space::S8);
+            ui.label(RichText::new(format!("{name}\n{}", t("This file changed on another device or tab."))).font(font(text::T14)).color(p.text_2));
+            ui.add_space(space::S16);
+            ui.horizontal(|ui| {
+                if ui.button(t("Reload theirs")).clicked() {
+                    self.resolve_file_conflict(ConflictChoice::ReloadTheirs);
+                }
+                if theme::primary_button(ui, p, t("Keep mine")).clicked() {
+                    self.resolve_file_conflict(ConflictChoice::KeepMine);
+                }
+                if ui.button(t("Save a copy")).clicked() {
+                    self.resolve_file_conflict(ConflictChoice::SaveACopy);
+                }
+            });
+        });
+        let _ = modal;
+    }
+
+    fn migration_dialog(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some(m) = self.migration.as_ref() else { return };
+        if m.pending > 0 || (m.saved.is_empty() && m.failed.is_empty()) {
+            return;
+        }
+        let saved = m.saved.clone();
+        let failed = m.failed.clone();
+        let modal = egui::Modal::new("file_migration".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.label(RichText::new(t("Your calendars were saved as files in Calendars.")).font(font_bold(text::T16)));
+            ui.add_space(space::S8);
+            if !saved.is_empty() {
+                ui.label(RichText::new(saved.join(", ")).font(font(text::T14)).color(p.text_2));
+            }
+            if !failed.is_empty() {
+                ui.add_space(space::S8);
+                ui.label(RichText::new(format!("{} {}", t("Could not save the calendar as a file."), failed.join(", "))).font(font(text::T14)).color(p.danger));
+            }
+            ui.add_space(space::S16);
+            if theme::primary_button(ui, p, t("OK")).clicked() {
+                self.migration = None;
+            }
+        });
+        if modal.should_close() {
+            self.migration = None;
         }
     }
 }
