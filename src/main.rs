@@ -53,6 +53,14 @@ mod native_cli {
         #[arg(long)]
         pub open_event: Option<String>,
 
+        /// Select this event without opening its details (for screenshots)
+        #[arg(long)]
+        pub select_event: Option<String>,
+
+        /// Show the delete confirmation for the selected or open event (for screenshots)
+        #[arg(long)]
+        pub confirm_delete: bool,
+
         /// Open the new-event dialog (for screenshots)
         #[arg(long)]
         pub new_event: bool,
@@ -81,7 +89,7 @@ mod native_cli {
             if trimmed.is_empty() {
                 continue;
             }
-            if let Some( p ) = resolved_path.as_deref() {
+            if let Some(p) = resolved_path.as_deref() {
                 let (reloaded, _) = CalendarStore::load_from_path_or_default(Some(p));
                 store = reloaded;
             }
@@ -93,11 +101,15 @@ mod native_cli {
                     "error": { "code": -32700, "message": format!("Parse error: {err}") }
                 })),
             };
-            if let Some( p ) = resolved_path.as_deref() {
+            if let Some(p) = resolved_path.as_deref() {
                 let _ = store.save_to_path(p);
             }
             if let Some(reply) = resp {
-                writeln!(stdout, "{}", serde_json::to_string(&reply).unwrap_or_default())?;
+                writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::to_string(&reply).unwrap_or_default()
+                )?;
                 stdout.flush()?;
             }
         }
@@ -172,17 +184,31 @@ mod native_cli {
         let launch = Launch {
             config_path: resolved_cfg,
             screenshot: args.screenshot.clone(),
-            view: args.view.as_deref().and_then(|v| serde_json::from_value::<ViewMode>(serde_json::Value::String(v.to_ascii_lowercase())).ok()),
+            view: args.view.as_deref().and_then(|v| {
+                serde_json::from_value::<ViewMode>(serde_json::Value::String(
+                    v.to_ascii_lowercase(),
+                ))
+                .ok()
+            }),
             theme: args.theme.clone(),
-            date: args.date.as_deref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()),
+            date: args
+                .date
+                .as_deref()
+                .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()),
             open_event: args.open_event.clone(),
+            select_event: args.select_event.clone(),
+            confirm_delete: args.confirm_delete,
             new_event: args.new_event,
             demo: args.demo,
             language: args.lang.clone(),
             settings: args.settings.as_deref().map(|t| u8::from(t == "accounts")),
             sidebar: args.sidebar.map(|v| v != 0),
         };
-        eframe::run_native("CalendarCraft", options, Box::new(move |_cc| Ok(Box::new(CalendarCraftApp::new(store, launch)))))
+        eframe::run_native(
+            "CalendarCraft",
+            options,
+            Box::new(move |_cc| Ok(Box::new(CalendarCraftApp::new(store, launch)))),
+        )
     }
 }
 

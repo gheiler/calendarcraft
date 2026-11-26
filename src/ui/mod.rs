@@ -62,6 +62,10 @@ pub struct Launch {
     pub date: Option<NaiveDate>,
     /// Open the details popover of this event.
     pub open_event: Option<String>,
+    /// Select this event (highlighted, details not opened). For screenshots.
+    pub select_event: Option<String>,
+    /// Ask before deleting the selected or open event. For screenshots.
+    pub confirm_delete: bool,
     /// Open the new-event dialog.
     pub new_event: bool,
     /// Use the sample data, ignoring what is stored.
@@ -1513,7 +1517,14 @@ impl CalendarCraftApp {
         );
         self.load_secrets();
         if let Some(id) = self.launch.open_event.clone() {
+            self.selected_event = Some(id.clone());
             self.open_inspector(&id, None);
+        }
+        if let Some(id) = self.launch.select_event.clone() {
+            self.selected_event = Some(id);
+        }
+        if self.launch.confirm_delete {
+            self.ask_delete_selected();
         }
         if self.launch.new_event {
             self.open_new_event(self.selected_date, None);
@@ -1577,11 +1588,21 @@ impl CalendarCraftApp {
     fn refresh_icon(&mut self, ctx: &egui::Context) {
         let now = Local::now();
         let day = now.date_naive();
+        let became_active = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::WindowFocused(true)))
+        });
         if self.icon_day != Some(day) {
             self.icon_day = Some(day);
             if let Ok(icon) = crate::icon::load_for_date(day) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(icon))));
             }
+            #[cfg(target_os = "macos")]
+            crate::icon::set_dock_icon_for_date(day);
+        } else if became_active {
+            // macOS can drop a cargo-run Dock icon after the app is backgrounded;
+            // putting it back when the window becomes active also catches a missed midnight.
             #[cfg(target_os = "macos")]
             crate::icon::set_dock_icon_for_date(day);
         }

@@ -716,7 +716,7 @@ impl CalendarStore {
                 start_time: hm(8, 0),
                 end_time: hm(9, 0),
                 all_day: false,
-                location: Some("Waterfront Trail".to_string()),
+                location: Some("Waterfront Trail\nPier 7\nSan Francisco, CA".to_string()),
                 conference_url: None,
                 notes: "5km tempo run.".to_string(),
                 attendees: vec![],

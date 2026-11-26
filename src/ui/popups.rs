@@ -222,11 +222,18 @@ impl CalendarCraftApp {
             egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.line)).corner_radius(corner).shadow(ctx.style().visuals.window_shadow).inner_margin(egui::Margin::same(20)).show(ui, |ui| {
                 ui.set_width(width - 40.0);
                 ui.horizontal(|ui| {
-                    // The close button goes in first, from the right, so it sits on the frame's
-                    // padding like Save below; its 16px cross is then nudged onto that edge.
+                    // The close button is placed by hand on the right so its 16px cross ends on the
+                    // same edge as Save below (the frame's 20px padding); the title gets the rest.
                     let row = ui.available_rect_before_wrap();
                     let close_rect = Rect::from_min_size(Pos2::new(row.right() - 32.0 + CLOSE_INSET, row.top()), Vec2::splat(32.0));
-                    if ui.put(close_rect, |ui: &mut egui::Ui| icon_button(ui, p, Icon::Close, t("Close"))).clicked() {
+                    let close_resp = ui.interact(close_rect, ui.id().with("inspector-close"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t("Close"));
+                    if close_resp.is_pointer_button_down_on() {
+                        ui.painter().rect_filled(close_rect, CornerRadius::same(8), p.primary_soft);
+                    } else if close_resp.hovered() {
+                        ui.painter().rect_filled(close_rect, CornerRadius::same(8), p.hover);
+                    }
+                    super::icons::paint(ui.painter(), Rect::from_center_size(close_rect.center(), Vec2::splat(16.0)), Icon::Close, p.text);
+                    if close_resp.clicked() {
                         close = true;
                     }
                     let (r, _) = ui.allocate_exact_size(Vec2::new(12.0, 32.0), egui::Sense::hover());
