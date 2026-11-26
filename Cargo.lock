@@ -256,6 +256,7 @@ dependencies = [
  "eframe",
  "egui",
  "getrandom 0.3.4",
+ "iana-time-zone",
  "image",
  "js-sys",
  "keyring",
