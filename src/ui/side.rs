@@ -20,8 +20,13 @@ const DOCK_MIN_W: f32 = 1000.0;
 /// Narrower windows get the view drop-down instead of the pills. These widths are egui
 /// points, which match CSS pixels on the web and logical points on the desktop.
 const COMPACT_W: f32 = 1400.0;
-/// Narrower still: the search field folds into its icon, and the title shrinks again.
+/// At this width and below, the search field folds into an icon that expands on click.
+const SEARCH_ICON_W: f32 = 1110.0;
+/// The tight layout: a smaller title, and New becomes "+".
 const TIGHT_W: f32 = 860.0;
+/// Leftover space the reserved title and the controls must leave, so egui does not shrink
+/// a widget until it touches its neighbour.
+const FIT_GAP: f32 = 16.0;
 /// The left-edge strip that peeks the sidebar, and how long the pointer rests there.
 const EDGE_W: f32 = 6.0;
 const PEEK_DELAY_MS: u64 = 250;
@@ -164,33 +169,53 @@ impl CalendarCraftApp {
         }
     }
 
-    /// The toolbar. Under 1400 points the view pills become a drop-down; under 860 points
-    /// the search field folds into its icon. Both are measured from the window width, so they
-    /// line up with the size you set in the browser or the OS. The title reserves the longest
-    /// month name so a short month cannot let the previous arrow sit where "December" would
-    /// reach, and the layout tightens further if the reserved title and the controls would
-    /// otherwise overlap.
+    /// The toolbar. At 1400 points and below the view pills become a drop-down; at 1110 and
+    /// below the search field folds into an icon that expands on click, next to the view
+    /// selector; at 860 and below the title shrinks again and New becomes "+". Widths are the
+    /// window size in egui points (CSS pixels on the web, logical points on the desktop). The
+    /// title reserves the longest month name so a short month cannot let the previous arrow
+    /// sit where "December" would reach, and the layout tightens a step further if the
+    /// reserved title and the controls would otherwise overlap or shrink into each other.
     fn toolbar(&mut self, ui: &mut egui::Ui, docked: bool) {
         let p = *self.palette();
         let width = ui.available_width();
         let screen_w = ui.ctx().screen_rect().width();
         let leading = if docked { 0.0 } else { 32.0 + space::S8 + space::S4 };
         let file_name = self.file_doc.as_ref().map(|d| if d.dirty { format!("{} •", d.name) } else { d.name.clone() });
-        let search_field = self.search_open || !self.search_query.is_empty();
-        let mode_width = |compact: bool, tight: bool| {
+        // Fit checks use the collapsed search chrome, so opening the field does not flip the
+        // rest of the toolbar into a tighter mode.
+        let mode_width = |compact: bool, search_icon: bool, tight: bool| {
             let size = if tight { text::T18 } else if compact { 20.0 } else { text::T24 };
             let file = if tight { 0.0 } else { file_name.as_ref().map(|n| pill_width(ui, n) + space::S8).unwrap_or(0.0) };
             let spinner = if self.busy > 0 { 14.0 + space::S8 } else { 0.0 };
-            leading + reserved_title_width(ui, size, self.view_mode) + spinner + file + controls_width(ui, compact, tight, search_field)
+            leading + reserved_title_width(ui, size, self.view_mode) + spinner + file + controls_width(ui, compact, search_icon, tight, false) + FIT_GAP
         };
-        let mut compact = screen_w < COMPACT_W;
-        let mut tight = screen_w < TIGHT_W;
-        if !compact && mode_width(false, false) > width {
+        let mut compact = screen_w <= COMPACT_W;
+        let mut search_icon = screen_w <= SEARCH_ICON_W;
+        let mut tight = screen_w <= TIGHT_W;
+        if !compact && mode_width(false, false, false) > width {
             compact = true;
         }
-        if !tight && mode_width(true, false) > width {
+        if !search_icon && mode_width(true, false, false) > width {
             compact = true;
+            search_icon = true;
+        }
+        if !tight && mode_width(true, true, false) > width {
+            compact = true;
+            search_icon = true;
             tight = true;
+        }
+        let search_expanded = self.search_open || !self.search_query.is_empty();
+        // Prefer an inline field next to the view selector; if that would crowd the
+        // title, open a popover instead, still anchored on the search icon.
+        let mut search_popup = false;
+        if search_icon && search_expanded {
+            if !tight && mode_width(compact, false, true) <= width {
+                tight = true;
+            }
+            if mode_width(compact, false, tight) > width {
+                search_popup = true;
+            }
         }
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = space::S8;
@@ -232,20 +257,33 @@ impl CalendarCraftApp {
                 if theme::primary_button(ui, &p, &new_label).on_hover_text(t("New event (⌘N)")).clicked() {
                     self.open_new_event(self.selected_date, None);
                 }
-                if tight && !self.search_open && self.search_query.is_empty() {
-                    if icon_button(ui, &p, Icon::Search, t("Search")).clicked() {
+                // Search sits immediately to the right of the view selector (it is added
+                // before the selector in this right-to-left group) at every breakpoint.
+                let inner = if tight { 120.0 } else { 150.0 };
+                let show_inline = !search_icon || (search_expanded && !search_popup);
+                if show_inline {
+                    let search = search_text_field(ui, &p, &mut self.search_query, inner);
+                    apply_search_focus_and_dismiss(ui, &search, &mut self.search_open, &mut self.search_query);
+                } else {
+                    let icon = icon_button(ui, &p, Icon::Search, t("Search"));
+                    if icon.clicked() {
                         self.search_open = true;
                     }
-                } else {
-                    let w = if tight { 120.0 } else { 150.0 };
-                    let search = theme::text_field_padded(ui, &p, egui::TextEdit::singleline(&mut self.search_query).id_salt("search").hint_text(t("Search")).desired_width(w), egui::Margin { left: 34, ..theme::INPUT_PADDING });
-                    icons::paint(ui.painter(), Rect::from_center_size(Pos2::new(search.rect.left() + 18.0, search.rect.center().y), Vec2::splat(14.0)), Icon::Search, p.text_3);
-                    if self.search_open {
-                        search.request_focus();
-                        self.search_open = false;
+                    if search_popup {
+                        let outer = search_outer_width(inner);
+                        let pos = Pos2::new(icon.rect.right() - outer, icon.rect.bottom() + space::S4);
+                        let popup = egui::Area::new("toolbar_search".into()).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+                            egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(4)).shadow(ui.ctx().style().visuals.popup_shadow).show(ui, |ui| {
+                                search_text_field(ui, &p, &mut self.search_query, inner)
+                            }).inner
+                        });
+                        apply_search_focus_and_dismiss(ui, &popup.inner, &mut self.search_open, &mut self.search_query);
+                        let clicked_outside = ui.ctx().input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|pt| !popup.response.rect.contains(pt) && !icon.rect.contains(pt)));
+                        if clicked_outside && self.search_query.is_empty() {
+                            self.search_open = false;
+                        }
                     }
                 }
-                ui.add_space(space::S4);
                 let views = [ViewMode::Day, ViewMode::Week, ViewMode::Month, ViewMode::Quarter, ViewMode::Year];
                 let changed = if compact { view_select(ui, &p, &mut self.view_mode, &views) } else { segmented(ui, &p, &mut self.view_mode, &views) };
                 if changed {
@@ -718,14 +756,50 @@ fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
     font_width(ui, label, font(text::T12)) + 20.0
 }
 
+
+fn search_text_field(ui: &mut egui::Ui, p: &theme::Palette, query: &mut String, inner: f32) -> egui::Response {
+    let pad = egui::Margin { left: 34, ..theme::INPUT_PADDING };
+    let outer = search_outer_width(inner);
+    let search = ui.allocate_ui_with_layout(Vec2::new(outer, theme::INPUT_HEIGHT), Layout::left_to_right(Align::Center), |ui| {
+        ui.set_min_size(Vec2::new(outer, theme::INPUT_HEIGHT));
+        theme::text_field_padded(ui, p, egui::TextEdit::singleline(query).id_salt("search").hint_text(t("Search")).desired_width(inner), pad)
+    }).inner;
+    icons::paint(ui.painter(), Rect::from_center_size(Pos2::new(search.rect.left() + 18.0, search.rect.center().y), Vec2::splat(14.0)), Icon::Search, p.text_3);
+    search
+}
+
+fn apply_search_focus_and_dismiss(ui: &egui::Ui, search: &egui::Response, search_open: &mut bool, query: &mut String) {
+    if *search_open && !search.has_focus() {
+        search.request_focus();
+    }
+    if search.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        query.clear();
+        *search_open = false;
+    } else if search.lost_focus() && query.is_empty() {
+        *search_open = false;
+    }
+}
+
+/// Painted width of the search field: the inner text width plus the left icon padding and
+/// the right input padding (`text_field_padded` draws the frame outside the text).
+fn search_outer_width(inner: f32) -> f32 {
+    inner + 34.0 + theme::INPUT_PADDING.right as f32
+}
+
 /// Minimum width of the toolbar's right-hand cluster (settings, new, search, views, nav).
-fn controls_width(ui: &egui::Ui, compact: bool, tight: bool, search_field: bool) -> f32 {
+fn controls_width(ui: &egui::Ui, compact: bool, search_icon: bool, tight: bool, search_field: bool) -> f32 {
     let gap = space::S8;
     let pad = space::S16 * 2.0;
     let icon = 32.0;
     let text_btn = |label: &str, bold: bool| font_width(ui, label, if bold { font_bold(text::T14) } else { font(text::T14) }) + pad;
     let new_w = if tight { text_btn("+", true) } else { text_btn(&format!("+  {}", t("New")), true) };
-    let search_w = if tight && !search_field { icon } else if tight { 120.0 } else { 150.0 };
+    let search_w = if search_icon && !search_field {
+        icon
+    } else if tight {
+        search_outer_width(120.0)
+    } else {
+        search_outer_width(150.0)
+    };
     let views_w = if compact {
         112.0
     } else {
@@ -733,7 +807,7 @@ fn controls_width(ui: &egui::Ui, compact: bool, tight: bool, search_field: bool)
         let labels: f32 = views.iter().map(|m| font_width(ui, t(m.label()), font_bold(text::T14)) + pad).sum();
         labels + 2.0 * 4.0 + 6.0
     };
-    icon + gap + new_w + gap + search_w + gap + space::S4 + views_w + gap + space::S4 + icon + gap + text_btn(t("Today"), false) + gap + icon
+    icon + gap + new_w + gap + search_w + gap + views_w + gap + space::S4 + icon + gap + text_btn(t("Today"), false) + gap + icon
 }
 
 pub fn sep(ui: &mut egui::Ui, p: &theme::Palette) {
