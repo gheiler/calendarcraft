@@ -1,5 +1,6 @@
-use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Weekday};
 pub use crate::nlp::NaiveDateExt;
+use crate::tz::{DisplayTz, EventZone};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,7 +14,6 @@ pub enum ViewMode {
     Quarter,
     Year,
 }
-
 
 impl ViewMode {
     pub fn label(&self) -> &'static str {
@@ -186,34 +186,208 @@ pub struct CalendarEvent {
     pub attendees: Vec<String>,
     #[serde(default)]
     pub alert_minutes_before: Option<u32>,
+    /// Wall-clock zone of `date` / `start_time` / `end_time`. Omitted in older stores (floating).
+    #[serde(default, skip_serializing_if = "EventZone::is_floating")]
+    pub zone: EventZone,
+    /// Excluded occurrence starts, in the event's own wall clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exdates: Vec<NaiveDateTime>,
 }
 
 impl CalendarEvent {
-    /// Whether the event shows on `day`.
-    pub fn covers(&self, day: NaiveDate) -> bool {
-        let span = self.end_date.filter(|end| *end > self.date).map(|end| (end - self.date).num_days()).unwrap_or(0);
-        match self.rrule.as_deref().and_then(crate::recur::parse) {
-            None => day >= self.date && day <= self.date + Duration::days(span),
-            Some(rule) => (0..=span).any(|k| crate::recur::occurs_on(&rule, self.date, day - Duration::days(k))),
+    fn parsed_rule(&self) -> Option<crate::recur::Rule> {
+        let mut rule = crate::recur::parse(self.rrule.as_deref()?)?;
+        for ex in &self.exdates {
+            if !rule.except.contains(ex) {
+                rule.except.push(*ex);
+            }
+        }
+        Some(rule)
+    }
+
+    fn start_wall(&self) -> NaiveDateTime {
+        self.date
+            .and_time(self.start_time.unwrap_or(NaiveTime::MIN))
+    }
+
+    fn end_wall(&self) -> NaiveDateTime {
+        let start = self.start_wall();
+        if self.all_day {
+            let last = self.end_date.unwrap_or(self.date).max(self.date);
+            return (last + Duration::days(1)).and_time(NaiveTime::MIN);
+        }
+        let end_day = self.end_date.unwrap_or(self.date);
+        let end = match self.end_time {
+            Some(t) => end_day.and_time(t),
+            None => start + Duration::hours(1),
+        };
+        if end <= start {
+            start + Duration::minutes(30)
+        } else {
+            end
         }
     }
 
-    /// Whether `day` is the first day of an occurrence (not a continuation of a multi-day one).
+    fn exclusive_end_date(start: NaiveDateTime, end: NaiveDateTime) -> Option<NaiveDate> {
+        let last = if end.time() == NaiveTime::MIN {
+            end.date() - Duration::days(1)
+        } else {
+            end.date()
+        };
+        (last > start.date()).then_some(last)
+    }
+
+    fn occurrence_clone(&self, start: NaiveDateTime, end: NaiveDateTime) -> CalendarEvent {
+        let mut ev = self.clone();
+        ev.date = start.date();
+        ev.start_time = if self.all_day {
+            None
+        } else {
+            Some(start.time())
+        };
+        ev.end_time = if self.all_day { None } else { Some(end.time()) };
+        ev.end_date = Self::exclusive_end_date(start, end);
+        ev.rrule = None;
+        ev.exdates.clear();
+        ev.zone = EventZone::Floating;
+        ev
+    }
+
+    /// Whether the event shows on `day`, treating written dates as local (floating / all-day,
+    /// or a display zone of [`DisplayTz::Local`]). Prefer [`covers_in`] when a zone is known.
+    pub fn covers(&self, day: NaiveDate) -> bool {
+        self.covers_in(day, DisplayTz::Local)
+    }
+
+    /// Whether `day` is the first day of an occurrence.
     pub fn starts_on(&self, day: NaiveDate) -> bool {
-        match self.rrule.as_deref().and_then(crate::recur::parse) {
-            None => day == self.date,
-            Some(rule) => crate::recur::occurs_on(&rule, self.date, day),
+        self.starts_on_in(day, DisplayTz::Local)
+    }
+
+    pub fn starts_on_in(&self, day: NaiveDate, display: DisplayTz) -> bool {
+        self.projected(day, display)
+            .is_some_and(|ev| ev.date == day)
+    }
+
+    /// Whether the event shows on the civil date `day` in `display`.
+    pub fn covers_in(&self, day: NaiveDate, display: DisplayTz) -> bool {
+        self.projected(day, display).is_some()
+    }
+
+    /// A copy whose date and times are the occurrence that falls on `day` in `display`.
+    /// The copy is floating (already in the display zone) and is not meant to be written back.
+    pub fn projected(&self, day: NaiveDate, display: DisplayTz) -> Option<CalendarEvent> {
+        if self.all_day || self.zone.is_floating() {
+            return self.project_floating(day);
         }
+        let start = self.start_wall();
+        let length = self.end_wall() - start;
+        let day_start = display.start_of_day(day);
+        let day_end = display.start_of_day(day + Duration::days(1));
+        let pad = length.num_seconds().abs().saturating_add(2 * 86_400);
+        let from_wall = crate::tz::wall_in_event_zone(&self.zone, day_start.saturating_sub(pad));
+        let to_wall = crate::tz::wall_in_event_zone(&self.zone, day_end.saturating_add(pad));
+        let rule = self.parsed_rule();
+        let walls = match &rule {
+            None => {
+                if start.date() + Duration::days(2) < from_wall.date()
+                    || start.date() > to_wall.date() + Duration::days(2)
+                {
+                    Vec::new()
+                } else {
+                    vec![start]
+                }
+            }
+            Some(rule) => {
+                let mut walls = crate::recur::occurrence_walls(rule, start, to_wall.date());
+                if let Some(until) = rule.until_utc {
+                    walls.retain(|w| crate::recur::start_instant(&self.zone, *w) <= until);
+                }
+                walls
+                    .into_iter()
+                    .filter(|w| w.date() + Duration::days(2) >= from_wall.date())
+                    .collect()
+            }
+        };
+        for wall in walls {
+            let end = wall + length;
+            let start_i = crate::recur::start_instant(&self.zone, wall);
+            let end_i = crate::recur::start_instant(&self.zone, end).max(start_i);
+            if !crate::recur::occurrence_hits_display_day(
+                start_i,
+                end_i.saturating_sub(start_i),
+                day,
+                display,
+                false,
+            ) {
+                continue;
+            }
+            let (shown_start, shown_end) =
+                crate::recur::display_range(&self.zone, wall, end, display);
+            return Some(self.occurrence_clone(shown_start, shown_end));
+        }
+        None
+    }
+
+    fn project_floating(&self, day: NaiveDate) -> Option<CalendarEvent> {
+        let span = self
+            .end_date
+            .filter(|end| *end > self.date)
+            .map(|end| (end - self.date).num_days())
+            .unwrap_or(0);
+        let start_day = match self.parsed_rule() {
+            None => {
+                if day >= self.date && day <= self.date + Duration::days(span) {
+                    self.date
+                } else {
+                    return None;
+                }
+            }
+            Some(rule) => (0..=span)
+                .map(|k| day - Duration::days(k))
+                .find(|d| crate::recur::occurs_on(&rule, self.date, *d))?,
+        };
+        let start = start_day.and_time(self.start_time.unwrap_or(NaiveTime::MIN));
+        let end = if self.all_day {
+            (start_day + Duration::days(span) + Duration::days(1)).and_time(NaiveTime::MIN)
+        } else {
+            let end_day = start_day + Duration::days(span);
+            match self.end_time {
+                Some(t) => {
+                    let end = end_day.and_time(t);
+                    if end <= start {
+                        start + Duration::minutes(30)
+                    } else {
+                        end
+                    }
+                }
+                None => start + Duration::hours(1),
+            }
+        };
+        Some(self.occurrence_clone(start, end))
     }
 
     pub fn uid_or_id(&self) -> String {
-        if self.uid.is_empty() { format!("{}@calendarcraft", self.id) } else { self.uid.clone() }
+        if self.uid.is_empty() {
+            format!("{}@calendarcraft", self.id)
+        } else {
+            self.uid.clone()
+        }
     }
 
     /// Minutes from midnight, for ordering; all-day events first.
     pub fn sort_key(&self) -> (u8, u32) {
         use chrono::Timelike;
-        if self.all_day { (0, 0) } else { (1, self.start_time.map(|t| t.hour() * 60 + t.minute()).unwrap_or(0)) }
+        if self.all_day {
+            (0, 0)
+        } else {
+            (
+                1,
+                self.start_time
+                    .map(|t| t.hour() * 60 + t.minute())
+                    .unwrap_or(0),
+            )
+        }
     }
 }
 
@@ -260,10 +434,18 @@ impl CalendarStore {
     /// No accounts or events: what a host that brings its own accounts starts from.
     pub fn empty() -> Self {
         Self {
-            settings: AppSettings { default_calendar_id: String::new(), active_calendar_set: Some("set_all".into()), ..AppSettings::default() },
+            settings: AppSettings {
+                default_calendar_id: String::new(),
+                active_calendar_set: Some("set_all".into()),
+                ..AppSettings::default()
+            },
             accounts: Vec::new(),
             calendars: Vec::new(),
-            calendar_sets: vec![CalendarSet { id: "set_all".into(), name: "All".into(), calendar_ids: Vec::new() }],
+            calendar_sets: vec![CalendarSet {
+                id: "set_all".into(),
+                name: "All".into(),
+                calendar_ids: Vec::new(),
+            }],
             events: Vec::new(),
             tasks: Vec::new(),
         }
@@ -349,10 +531,11 @@ impl CalendarStore {
 
     pub fn events_on_date(&self, date: NaiveDate, filter_query: &str) -> Vec<&CalendarEvent> {
         let q = filter_query.trim().to_lowercase();
+        let display = DisplayTz::parse(&self.settings.timezone);
         let mut list: Vec<&CalendarEvent> = self
             .events
             .iter()
-            .filter(|ev| ev.covers(date) && self.is_calendar_visible(&ev.calendar_id))
+            .filter(|ev| ev.covers_in(date, display) && self.is_calendar_visible(&ev.calendar_id))
             .filter(|ev| {
                 if q.is_empty() {
                     true
@@ -382,7 +565,8 @@ impl CalendarStore {
     }
 
     pub fn next_id(&self, prefix: &str) -> String {
-        let count = self.events.len() + self.tasks.len() + self.accounts.len() + self.calendars.len() + 1;
+        let count =
+            self.events.len() + self.tasks.len() + self.accounts.len() + self.calendars.len() + 1;
         let ts = Local::now().timestamp_subsec_millis();
         format!("{prefix}_{count}_{ts}")
     }

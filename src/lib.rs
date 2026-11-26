@@ -12,6 +12,7 @@ pub mod recur;
 pub mod secrets;
 pub mod sync;
 pub mod theme;
+pub mod tz;
 pub mod ui;
 
 pub use model::CalendarStore;
