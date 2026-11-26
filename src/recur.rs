@@ -211,6 +211,12 @@ pub fn occurrence_walls(
             break;
         }
         let wall = d.and_time(start.time());
+        // COUNT counts the occurrences the rule makes; an excluded one still uses up its place
+        // (RFC 5545 §3.8.5.1: EXDATE is taken out of the set after the rule made it).
+        n += 1;
+        if rule.rec.count.is_some_and(|c| n > c) {
+            break;
+        }
         if !rule.except.iter().any(|ex| {
             if ex.time() == chrono::NaiveTime::MIN && start.time() != chrono::NaiveTime::MIN {
                 ex.date() == d
@@ -218,10 +224,6 @@ pub fn occurrence_walls(
                 *ex == wall || ex.date() == d && ex.time() == chrono::NaiveTime::MIN
             }
         }) {
-            n += 1;
-            if rule.rec.count.is_some_and(|c| n > c) {
-                break;
-            }
             out.push(wall);
         }
         day = d + Duration::days(1);
