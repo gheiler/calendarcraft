@@ -1,7 +1,8 @@
 [package]
 name = "calendarcraft"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
+default-run = "calendarcraft"
 description = "Clean-room calendar app in Rust for macOS, WebAssembly, and MCP"
 
 [lib]
@@ -20,7 +21,11 @@ path = "src/bin/mcp_server.rs"
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 egui = "0.31"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+chrono-tz = "0.10"
+# Building blocks only (content lines, values, RRULE, VTIMEZONE). No egui, no ICU.
+# Pin a commit: the repo does not publish this crate on crates.io.
+craft-ical = { git = "https://github.com/storytold/craft-libs", rev = "dc2cb42b15676a6cf8a2b1f42fe29b261d1fa56d" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 quick-xml = "0.37"
@@ -35,6 +40,7 @@ pollster = "0.4"
 keyring = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+chrono = { version = "0.4", features = ["serde", "clock", "wasmbind"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 getrandom = { version = "0.3", features = ["wasm_js"] }

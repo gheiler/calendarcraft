@@ -5,9 +5,9 @@ A push to `main` starts the *Tag and release* workflow. It reads the version in
 creates that tag on the commit that was pushed and publishes a GitHub release. If the
 tag already exists, it is not moved; if the release already exists, nothing is
 published again. So a later merge that forgot to bump the version will not overwrite
-v0.2.2.
+v0.3.0.
 
-You can still push a version tag (`v0.2.2`) yourself from a commit whose `Cargo.toml`
+You can still push a version tag (`v0.3.0`) yourself from a commit whose `Cargo.toml`
 version matches. That starts the same release jobs. Tags created by `GITHUB_TOKEN`
 do not start other workflows, which is why *Tag and release* calls the release
 workflow directly rather than waiting for the tag push.
