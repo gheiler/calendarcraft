@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod caldav;
+pub mod filesync;
 pub mod host;
 pub mod i18n;
 pub mod ics;
