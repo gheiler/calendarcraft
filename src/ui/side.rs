@@ -17,8 +17,11 @@ const SIDEBAR_MARGIN: egui::Margin = egui::Margin { left: 16, right: 16, top: 12
 const TOOLBAR_H: f32 = 60.0;
 /// Narrower windows show the sidebar over the calendar instead of beside it.
 const DOCK_MIN_W: f32 = 1000.0;
-/// Narrower windows get the view drop-down instead of the pills.
-const COMPACT_W: f32 = 1200.0;
+/// Narrower windows get the view drop-down instead of the pills. These widths are egui
+/// points, which match CSS pixels on the web and logical points on the desktop.
+const COMPACT_W: f32 = 1400.0;
+/// Narrower still: the search field folds into its icon, and the title shrinks again.
+const TIGHT_W: f32 = 860.0;
 /// The left-edge strip that peeks the sidebar, and how long the pointer rests there.
 const EDGE_W: f32 = 6.0;
 const PEEK_DELAY_MS: u64 = 250;
@@ -161,14 +164,34 @@ impl CalendarCraftApp {
         }
     }
 
-    /// The toolbar. Under 1200px (or when the sidebar leaves it under 900px) the view pills
-    /// become a drop-down; under 760px the search field folds into its icon.
+    /// The toolbar. Under 1400 points the view pills become a drop-down; under 860 points
+    /// the search field folds into its icon. Both are measured from the window width, so they
+    /// line up with the size you set in the browser or the OS. The title reserves the longest
+    /// month name so a short month cannot let the previous arrow sit where "December" would
+    /// reach, and the layout tightens further if the reserved title and the controls would
+    /// otherwise overlap.
     fn toolbar(&mut self, ui: &mut egui::Ui, docked: bool) {
         let p = *self.palette();
         let width = ui.available_width();
         let screen_w = ui.ctx().screen_rect().width();
-        let compact = screen_w < COMPACT_W || width < 900.0;
-        let tight = width < 760.0;
+        let leading = if docked { 0.0 } else { 32.0 + space::S8 + space::S4 };
+        let file_name = self.file_doc.as_ref().map(|d| if d.dirty { format!("{} •", d.name) } else { d.name.clone() });
+        let search_field = self.search_open || !self.search_query.is_empty();
+        let mode_width = |compact: bool, tight: bool| {
+            let size = if tight { text::T18 } else if compact { 20.0 } else { text::T24 };
+            let file = if tight { 0.0 } else { file_name.as_ref().map(|n| pill_width(ui, n) + space::S8).unwrap_or(0.0) };
+            let spinner = if self.busy > 0 { 14.0 + space::S8 } else { 0.0 };
+            leading + reserved_title_width(ui, size, self.view_mode) + spinner + file + controls_width(ui, compact, tight, search_field)
+        };
+        let mut compact = screen_w < COMPACT_W;
+        let mut tight = screen_w < TIGHT_W;
+        if !compact && mode_width(false, false) > width {
+            compact = true;
+        }
+        if !tight && mode_width(true, false) > width {
+            compact = true;
+            tight = true;
+        }
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = space::S8;
             if !docked {
@@ -180,10 +203,16 @@ impl CalendarCraftApp {
             }
             let (big, small) = self.title_text();
             let size = if tight { text::T18 } else if compact { 20.0 } else { text::T24 };
-            ui.label(RichText::new(big).font(font_bold(size)).color(p.text));
-            if !small.is_empty() {
-                ui.label(RichText::new(small).font(font(size)).color(p.text_2));
-            }
+            // Keep the previous arrow off the title by reserving the widest month (plus year
+            // or day number) at this size, so short names do not free space a long name needs.
+            let title_w = reserved_title_width(ui, size, self.view_mode);
+            ui.allocate_ui_with_layout(Vec2::new(title_w, ui.available_height()), Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = space::S8;
+                ui.label(RichText::new(&big).font(font_bold(size)).color(p.text));
+                if !small.is_empty() {
+                    ui.label(RichText::new(&small).font(font(size)).color(p.text_2));
+                }
+            });
             if self.busy > 0 {
                 ui.add(egui::Spinner::new().size(14.0).color(p.primary));
             }
@@ -666,6 +695,45 @@ fn agenda_row(ui: &mut egui::Ui, p: &theme::Palette, ev: &CalendarEvent, color: 
     };
     painter.text(Pos2::new(rect.left() + 18.0, rect.top() + 29.0), Align2::LEFT_CENTER, sub, font(text::T12), p.text_2);
     resp.clicked().then_some(rect)
+}
+
+
+fn font_width(ui: &egui::Ui, text: &str, font: egui::FontId) -> f32 {
+    ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font, Color32::WHITE).size().x)
+}
+
+/// Space for the title at `size`, using the longest month name in the current language.
+fn reserved_title_width(ui: &egui::Ui, size: f32, view: ViewMode) -> f32 {
+    let gap = space::S8;
+    let month = (1u32..=12).map(|m| font_width(ui, i18n::month_name(m), font_bold(size))).fold(0.0_f32, f32::max);
+    let year = font_width(ui, "0000", font(size));
+    match view {
+        ViewMode::Year => font_width(ui, "0000", font_bold(size)),
+        ViewMode::Day => font_width(ui, "31 ", font_bold(size)) + month + gap + year,
+        ViewMode::Month | ViewMode::Week | ViewMode::Quarter => month + gap + year,
+    }
+}
+
+fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
+    font_width(ui, label, font(text::T12)) + 20.0
+}
+
+/// Minimum width of the toolbar's right-hand cluster (settings, new, search, views, nav).
+fn controls_width(ui: &egui::Ui, compact: bool, tight: bool, search_field: bool) -> f32 {
+    let gap = space::S8;
+    let pad = space::S16 * 2.0;
+    let icon = 32.0;
+    let text_btn = |label: &str, bold: bool| font_width(ui, label, if bold { font_bold(text::T14) } else { font(text::T14) }) + pad;
+    let new_w = if tight { text_btn("+", true) } else { text_btn(&format!("+  {}", t("New")), true) };
+    let search_w = if tight && !search_field { icon } else if tight { 120.0 } else { 150.0 };
+    let views_w = if compact {
+        112.0
+    } else {
+        let views = [ViewMode::Day, ViewMode::Week, ViewMode::Month, ViewMode::Quarter, ViewMode::Year];
+        let labels: f32 = views.iter().map(|m| font_width(ui, t(m.label()), font_bold(text::T14)) + pad).sum();
+        labels + 2.0 * 4.0 + 6.0
+    };
+    icon + gap + new_w + gap + search_w + gap + space::S4 + views_w + gap + space::S4 + icon + gap + text_btn(t("Today"), false) + gap + icon
 }
 
 pub fn sep(ui: &mut egui::Ui, p: &theme::Palette) {
