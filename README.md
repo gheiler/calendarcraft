@@ -27,6 +27,16 @@ understands sentences ("Dinner with Ada friday 7pm at Osteria"), and runs inside
   sits at the start of the toolbar, and resting the pointer on the left edge peeks the sidebar
   over the calendar. Below 1000 px wide the sidebar always opens over the calendar; below
   1200 px the view switcher becomes a menu.
+- **Search** like Fantastical: type in the toolbar's search field (the icon next to Day/Month on a
+  phone) and a list opens under it with matches from every date, upcoming first and then past ones,
+  grouped by day with time, title and calendar. Every word must appear in the title, location,
+  notes, attendees or calendar name, ignoring case and accents ("cafe zurich" finds "Café Zürich").
+  A repeating event lists its next three occurrences and its last past one. ↑/↓ move, Enter or a
+  click goes to that day and opens the event, Esc closes. The calendar itself is not filtered.
+- **Calendar sets:** Settings › Sets makes sets such as Work or Family (a name and the calendars to
+  tick), and edits, renames or deletes them. Their pills appear over the calendar list next to
+  **All** (always every visible calendar) once a set exists. A set whose calendars were all removed
+  shows nothing and says so, instead of quietly showing everything.
 - **Keys:** N or C new event, T today, ←/→ previous and next, ⌘\ or Ctrl+\ sidebar.
 - **Events:** click an event for a popover inspector (calendar, all-day, date and times, location,
   link, alert, repeat, notes, delete); double-click an empty slot or day, press **N** (or **C**, or
@@ -34,7 +44,9 @@ understands sentences ("Dinner with Ada friday 7pm at Osteria"), and runs inside
 - **Phone layout** below 720 px: Day and Month, a week strip, swipe sideways to change month.
 - **Look:** SnowUI light and dark (purple `#B899EB`, `#6E48B8` for text and filled buttons),
   system typography (SF Pro on macOS, Inter in the browser), roomy buttons (16 × 7 px padding,
-  32 px high), follows the system theme unless set.
+  32 px high), follows the system theme unless set. Saturday and Sunday have a faint blue tint
+  (and blue weekday names) in Month, Week and Quarter; days outside the month are clearly greyer,
+  with their numbers and events faded.
 - **Languages:** English, Deutsch, Español, Français, Italiano, Português (Brasil).
 - **Accounts:** CalDAV (iCloud, Fastmail, Nextcloud, Stalwart, any RFC 4791 server), `.ics` feeds
   (read only), local calendars (standalone) or `.ics` files in the host's drive (artcraftCloud), and opened `.ics` files. See [docs/accounts.md](docs/accounts.md).
@@ -55,7 +67,9 @@ sh scripts/package-web.sh                 # dist-release/calendarcraft-web-<vers
 ```
 
 The browser build takes `?view=`, `?theme=`, `?date=`, `?lang=`, `?demo=1` (sample calendars),
-`?open=<event id>`, `?new=1`, `?settings=general|accounts` and `?sidebar=0|1`. `scripts/screenshots.cjs` takes the screenshots above from a
+`?open=<event id>`, `?new=1`, `?settings=general|accounts|sets|mcp`, `?sidebar=0|1`,
+`?search=<text>` (search open with that text) and `?sets=1` (two sample sets; `?sets=edit` also
+opens the first one's form). `scripts/screenshots.cjs` takes the screenshots above from a
 served build (puppeteer-core and Chrome).
 
 The desktop app uses `assets/icon.png` (the same logo as the web favicon) as its window

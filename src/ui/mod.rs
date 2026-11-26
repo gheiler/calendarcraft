@@ -85,6 +85,8 @@ pub struct Launch {
     pub edit_account: Option<String>,
     /// Add two sample calendar sets to the demo data (for screenshots).
     pub sample_sets: bool,
+    /// Open this set's form in Settings › Sets (for screenshots).
+    pub edit_set: Option<String>,
     /// Start with this text in the search field (for screenshots).
     pub search: Option<String>,
 }
@@ -1545,6 +1547,13 @@ impl CalendarCraftApp {
             Arc::new(move || c.request_repaint()),
         );
         self.load_secrets();
+        if let Some(id) = self.launch.edit_set.clone() {
+            if let Some(set) = self.store.user_sets().find(|s| s.id == id).cloned() {
+                self.settings_open = true;
+                self.settings_tab = 2;
+                self.set_form = Some(sets::SetForm { id: Some(set.id), name: set.name, calendar_ids: set.calendar_ids, error: None });
+            }
+        }
         if let Some(q) = self.launch.search.clone() {
             self.search_query = q;
             self.search_open = true;

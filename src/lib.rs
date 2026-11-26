@@ -29,7 +29,7 @@ use wasm_bindgen::prelude::*;
 /// craft-web-host bridge), `view=month|quarter|…`, `theme=light|dark|system`, `date=2026-11-24`,
 /// `demo=1` (sample data), `lang=de`, `open=<event id>`, `select=<event id>`, `delete=1`,
 /// `new=1`, `settings=general|accounts|sets|mcp`, `sidebar=0|1`, `caldav=1` (sample CalDAV
-/// account without a saved password), `edit=<account id>`, `sets=1` (two sample calendar sets),
+/// account without a saved password), `edit=<account id>`, `sets=1` (two sample calendar sets; `sets=edit` also opens the first one's form),
 /// `search=<text>` (search opened with this text).
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -55,6 +55,7 @@ pub fn wasm_start() -> Result<(), JsValue> {
         caldav_sample: query("caldav").is_some(),
         edit_account: query("edit"),
         sample_sets: query("sets").is_some(),
+        edit_set: query("sets").filter(|v| v == "edit").map(|_| "set_work".to_string()),
         search: query("search"),
         ..Default::default()
     };

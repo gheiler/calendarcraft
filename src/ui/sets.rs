@@ -4,7 +4,7 @@
 
 use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Vec2};
 
-use super::icons::Icon;
+use super::icons::{self, Icon};
 use super::side::small_icon;
 use super::CalendarCraftApp;
 use crate::i18n::t;
@@ -104,9 +104,13 @@ impl CalendarCraftApp {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
                         for (color, name) in names {
-                            let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
-                            ui.painter().circle_filled(r.center(), 4.0, color);
-                            ui.label(RichText::new(name).font(font(text::T12)).color(p.text_2));
+                            // Dot and name as one item, so a wrap never parts them.
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
+                                ui.painter().circle_filled(r.center(), 4.0, color);
+                                ui.add(egui::Label::new(RichText::new(name).font(font(text::T12)).color(p.text_2)).wrap_mode(egui::TextWrapMode::Extend));
+                            });
                             ui.add_space(space::S4);
                         }
                     });
@@ -169,20 +173,29 @@ impl CalendarCraftApp {
                 ui.label(RichText::new(account).font(font_bold(text::T12)).color(p.text_2));
             }
             for c in cals {
-                let mut on = f.calendar_ids.contains(&c.id);
-                ui.horizontal(|ui| {
-                    if ui.checkbox(&mut on, "").changed() {
-                        if on {
-                            f.calendar_ids.push(c.id.clone());
-                        } else {
-                            f.calendar_ids.retain(|id| *id != c.id);
-                        }
-                        f.error = None;
+                // The same coloured tick as the sidebar's calendar list.
+                let on = f.calendar_ids.contains(&c.id);
+                let color = theme::color_of(&c.color_hex);
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), egui::Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(rect, CornerRadius::same(6), p.surface);
+                }
+                let box_r = egui::Rect::from_center_size(egui::Pos2::new(rect.left() + 12.0, rect.center().y), Vec2::splat(14.0));
+                if on {
+                    ui.painter().rect_filled(box_r, CornerRadius::same(4), color);
+                    icons::paint(ui.painter(), box_r.shrink(2.0), Icon::Check, Color32::WHITE);
+                } else {
+                    ui.painter().rect_stroke(box_r, CornerRadius::same(4), egui::Stroke::new(1.5_f32, color), egui::StrokeKind::Inside);
+                }
+                ui.painter().text(egui::Pos2::new(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, &c.name, font(text::T14), p.text);
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    if on {
+                        f.calendar_ids.retain(|id| *id != c.id);
+                    } else {
+                        f.calendar_ids.push(c.id.clone());
                     }
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
-                    ui.painter().circle_filled(r.center(), 4.5, theme::color_of(&c.color_hex));
-                    ui.add(egui::Label::new(RichText::new(&c.name).font(font(text::T14))).truncate());
-                });
+                    f.error = None;
+                }
             }
         }
         if calendars.is_empty() {

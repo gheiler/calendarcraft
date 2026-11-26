@@ -285,7 +285,11 @@ impl CalendarCraftApp {
             }
         }
         // Veil what sits on days outside the month, so they read as dimmer than the month.
-        let veil = Color32::from_rgba_unmultiplied(p.outside.r(), p.outside.g(), p.outside.b(), if p.dark { 150 } else { 140 });
+        // Premultiplied by hand: egui blends in gamma space, and `from_rgba_unmultiplied`
+        // premultiplies in linear space, which would wash a light veil out to white.
+        let a: u16 = if p.dark { 130 } else { 115 };
+        let pm = |c: u8| (c as u16 * a / 255) as u8;
+        let veil = Color32::from_rgba_premultiplied(pm(p.outside.r()), pm(p.outside.g()), pm(p.outside.b()), a as u8);
         for (d, cell) in &cells {
             if d.month() != month.month() && *d != self.selected_date {
                 grid_painter.rect_filled(cell.shrink(1.0), CornerRadius::ZERO, veil);
