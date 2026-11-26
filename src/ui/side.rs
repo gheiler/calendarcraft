@@ -639,10 +639,42 @@ impl CalendarCraftApp {
                     });
                 });
                 ui.add_space(space::S4);
-                let mut mode = if self.view_mode == ViewMode::Day { ViewMode::Day } else { ViewMode::Month };
-                if segmented(ui, &p, &mut mode, &[ViewMode::Day, ViewMode::Month]) {
-                    self.set_view(mode);
-                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = space::S8;
+                    let mut mode = if self.view_mode == ViewMode::Day { ViewMode::Day } else { ViewMode::Month };
+                    if segmented(ui, &p, &mut mode, &[ViewMode::Day, ViewMode::Month]) {
+                        self.set_view(mode);
+                    }
+                    // Search sits next to the Day/Month selector, as an icon that expands
+                    // into a focused field when there is room, or a popover when there is not.
+                    let search_expanded = self.search_open || !self.search_query.is_empty();
+                    let inner = 120.0;
+                    let show_inline = search_expanded && ui.available_width() >= search_outer_width(inner);
+                    if show_inline {
+                        let search = search_text_field(ui, &p, &mut self.search_query, inner);
+                        apply_search_focus_and_dismiss(ui, &search, &mut self.search_open, &mut self.search_query);
+                    } else {
+                        let icon = icon_button(ui, &p, Icon::Search, t("Search"));
+                        if icon.clicked() {
+                            self.search_open = true;
+                        }
+                        if search_expanded {
+                            let outer = search_outer_width(inner);
+                            let left = (icon.rect.right() - outer).max(ui.clip_rect().left() + 4.0);
+                            let pos = Pos2::new(left, icon.rect.bottom() + space::S4);
+                            let popup = egui::Area::new("mobile_search".into()).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+                                egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(4)).shadow(ui.ctx().style().visuals.popup_shadow).show(ui, |ui| {
+                                    search_text_field(ui, &p, &mut self.search_query, inner)
+                                }).inner
+                            });
+                            apply_search_focus_and_dismiss(ui, &popup.inner, &mut self.search_open, &mut self.search_query);
+                            let clicked_outside = ui.ctx().input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|pt| !popup.response.rect.contains(pt) && !icon.rect.contains(pt)));
+                            if clicked_outside && self.search_query.is_empty() {
+                                self.search_open = false;
+                            }
+                        }
+                    }
+                });
             });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.surface).inner_margin(egui::Margin::symmetric(12, 8))).show(ctx, |ui| {
             if self.view_mode == ViewMode::Day {

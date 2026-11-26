@@ -95,6 +95,19 @@ pub fn migrate_plain(
     Ok(plain)
 }
 
+/// True when every entry `migrate_plain` would copy reads back unchanged through `get`, with a
+/// fresh lookup. Only then is the plaintext copy safe to delete: a store that only keeps values
+/// in memory (keyring's mock backend) or silently drops writes fails this check.
+pub fn migration_verified(
+    plain: &BTreeMap<String, String>,
+    mut get: impl FnMut(&str) -> Option<String>,
+) -> bool {
+    plain
+        .iter()
+        .filter(|(id, password)| valid_account_id(id) && !password.is_empty())
+        .all(|(id, password)| get(id).as_deref() == Some(password.as_str()))
+}
+
 /// Pair each leftover plaintext password with the username already on the account, if any.
 pub fn hosted_migration_entries(
     plain: &BTreeMap<String, String>,
@@ -144,14 +157,12 @@ async fn startup_local(account_ids: &[String]) -> Result<BTreeMap<String, String
     let mut out = BTreeMap::new();
     if let Some(text) = host::load(KEY_SECRETS) {
         if let SecretsFile::Plain(plain) = parse_secrets_file(&text) {
-            migrate_plain(plain.clone(), set_local_blocking)?;
-            // Native: delete the plaintext file. Web: replace it with ciphertext in set_local,
-            // then still remove any leftover plaintext by writing the encrypted form only
-            // (already done) — if we are native, remove the file; if web, `set` already
-            // rewrote the key, but a failed encrypt should not delete. After a successful
-            // migrate we drop the plaintext key on native; on web `flush_encrypted` did it.
-            #[cfg(not(target_arch = "wasm32"))]
-            host::remove(KEY_SECRETS);
+            // Delete the plaintext file only once every password reads back from the OS store.
+            // Otherwise keep it (and use it this session) so nothing is lost.
+            let moved = migrate_plain(plain.clone(), set_local_blocking).is_ok();
+            if moved && migration_verified(&plain, get_local_blocking) {
+                host::remove(KEY_SECRETS);
+            }
             out.extend(plain);
         }
     }
@@ -159,7 +170,8 @@ async fn startup_local(account_ids: &[String]) -> Result<BTreeMap<String, String
         if out.contains_key(id) {
             continue;
         }
-        if let Some(password) = get_local(id).await? {
+        // One unreadable entry must not hide every other account's password.
+        if let Ok(Some(password)) = get_local(id).await {
             out.insert(id.clone(), password);
         }
     }
@@ -236,6 +248,11 @@ fn set_local_blocking(account_id: &str, password: &str) -> Result<(), String> {
 #[cfg(not(target_arch = "wasm32"))]
 async fn set_local(account_id: &str, password: &str) -> Result<(), String> {
     set_local_blocking(account_id, password)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn get_local_blocking(account_id: &str) -> Option<String> {
+    keyring::Entry::new(SERVICE, account_id).ok()?.get_password().ok()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -617,6 +634,22 @@ mod tests {
         assert_eq!(stored.get("acc_two").map(String::as_str), Some("other"));
         assert!(!stored.contains_key("bad/id"), "invalid ids are not copied");
         assert!(!stored.values().any(|v| v.is_empty()));
+    }
+
+    #[test]
+    fn plaintext_is_kept_unless_every_password_reads_back() {
+        let plain = BTreeMap::from([
+            ("acc_one".into(), "s3cret".into()),
+            ("acc_two".into(), "other".into()),
+            ("bad/id".into(), "ignored".into()),
+        ]);
+        let store = plain.clone();
+        assert!(migration_verified(&plain, |id| store.get(id).cloned()));
+        // A store that forgets (keyring's mock backend) or keeps a different value.
+        assert!(!migration_verified(&plain, |_| None));
+        assert!(!migration_verified(&plain, |id| (id == "acc_one").then(|| "s3cret".to_string())));
+        assert!(!migration_verified(&plain, |_| Some("stale".to_string())));
+        assert!(migration_verified(&BTreeMap::new(), |_| None));
     }
 
     #[test]
