@@ -447,10 +447,11 @@ impl CalendarCraftApp {
     }
 
     pub fn events_on(&self, day: NaiveDate) -> Vec<CalendarEvent> {
+        let display = crate::tz::DisplayTz::parse(&self.store.settings.timezone);
         self.store
             .events_on_date(day, &self.search_query)
             .into_iter()
-            .cloned()
+            .filter_map(|ev| ev.projected(day, display))
             .collect()
     }
 

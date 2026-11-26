@@ -106,8 +106,10 @@ password. How artcraftCloud does it: [docs/caldav.md](docs/caldav.md).
 
 ## Known limits
 
-- Times with a `TZID` are read as local wall-clock time; UTC times are converted. Events are
-  written in UTC.
+- Timed events keep the zone they were written in (`TZID` + `VTIMEZONE`, UTC `…Z`, or floating)
+  and are shown in the zone set under Settings (or the device zone when that is `Local`). All-day
+  dates and floating times are not shifted. A round trip writes the same kind of time back,
+  including a `VTIMEZONE` for named zones.
 - Properties CalendarCraft doesn't show (attendee status, attachments, `X-` properties) are not
   kept when it writes an event back. A resource holding several events (a recurring series with
   exceptions) is shown read-only.

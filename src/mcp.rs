@@ -314,6 +314,7 @@ pub fn call_tool(store: &mut CalendarStore, name: &str, args: &Value) -> Result<
                 notes,
                 attendees: Vec::new(),
                 alert_minutes_before: Some(10),
+                zone: crate::tz::EventZone::from_settings(&store.settings.timezone),
                 ..Default::default()
             };
             store.events.push(ev.clone());
