@@ -43,6 +43,9 @@ pub struct AppSettings {
     pub default_calendar_id: String,
     #[serde(default)]
     pub active_calendar_set: Option<String>,
+    /// How often to check file-backed calendars in a host, in seconds. `0` means the default (120).
+    #[serde(default)]
+    pub file_sync_interval_secs: u32,
 }
 
 fn default_dark_mode() -> bool {
@@ -71,6 +74,7 @@ impl Default for AppSettings {
             timezone: "America/Los_Angeles".to_string(),
             default_calendar_id: "cal_work".to_string(),
             active_calendar_set: Some("set_all".to_string()),
+            file_sync_interval_secs: 0,
         }
     }
 }
@@ -133,6 +137,12 @@ pub struct CalendarSource {
     /// The collection's `getctag` / sync token when last read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctag: Option<String>,
+    /// Host drive path (file id) when this calendar is stored as an `.ics` file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    /// Last seen ETag / revision of that file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_etag: Option<String>,
 }
 
 impl CalendarSource {

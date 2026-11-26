@@ -34,6 +34,24 @@ can't be written to without an OAuth sign-in, which CalendarCraft doesn't have y
   sizeable component, credentials held server-side); (c) let Stalwart fetch the external mailbox
   into the user's mailbox (Stalwart has no built-in IMAP fetcher; a fetchmail/imapsync sidecar).
 
+
+## Local calendars, and calendars in your files
+
+Settings › Accounts ends with a form to create a calendar that is not on a CalDAV server.
+
+- **Standalone web and the desktop app:** *Calendar on this device.* Events live in
+  `calendarcraft.store` (or the desktop store file).
+- **Inside artcraftCloud:** *Calendar in my files.* Creating one writes an `.ics` file into
+  `Calendars/` in the person's drive (named after the calendar), through the host's file APIs
+  (`calendarcraft:file`). Several of these can be shown at once. The store keeps only a
+  reference by file id (the drive path) and the last ETag, not the events. A background check
+  (default two minutes, configurable under Settings › General, and also when the window is
+  focused) reloads a file that changed elsewhere when there are no unsaved edits. If both the
+  file and this session changed, a dialog offers *Reload theirs*, *Keep mine*, or *Save a copy*
+  (the write uses If-Match / the current revision). Existing store calendars from earlier
+  versions are exported to `Calendars/` once on first start, and are removed from the store only
+  after a successful write.
+
 ## Where passwords are kept
 
 CalendarCraft no longer writes account passwords as a plaintext JSON map.
