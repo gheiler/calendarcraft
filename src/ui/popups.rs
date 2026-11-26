@@ -588,9 +588,6 @@ impl CalendarCraftApp {
                         };
                         let detail = [kind.to_string(), acc.email.clone(), acc.server_url.clone().unwrap_or_default()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
                         ui.label(RichText::new(detail).font(font(text::T12)).color(p.text_2));
-                        if let Some(err) = self.status.get(&acc.id).cloned() {
-                            self.account_error(ui, p, &acc.id, &err);
-                        }
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if !acc.host_managed && acc.kind != AccountKind::File && ui.add(egui::Button::new(RichText::new(t("Remove")).color(p.danger))).clicked() {
@@ -601,6 +598,10 @@ impl CalendarCraftApp {
                         }
                     });
                 });
+                // Below the buttons, across the card, so a long message is not covered.
+                if let Some(err) = self.status.get(&acc.id).cloned() {
+                    self.account_error(ui, p, &acc.id, &err);
+                }
             });
         }
         ui.add_space(space::S12);
