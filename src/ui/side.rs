@@ -478,7 +478,8 @@ impl CalendarCraftApp {
         let touching = ui.input(|i| i.any_touches());
         let mut jumped = false;
         let mut headers: Vec<(NaiveDate, f32)> = Vec::new();
-        let mut clicked: Option<(String, Rect)> = None;
+        let mut clicked: Option<(String, Rect, bool)> = None;
+        let highlighted = self.highlighted_event();
         let mut picked_day: Option<NaiveDate> = None;
         let out = egui::ScrollArea::vertical().id_salt("agenda").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -515,8 +516,8 @@ impl CalendarCraftApp {
                     ui.label(RichText::new(t("No events")).font(font(text::T12)).color(p.text_3));
                 }
                 for ev in &events {
-                    if let Some(rect) = agenda_row(ui, &p, ev, self.cal_color(&ev.calendar_id), d, self.inspector.as_ref().is_some_and(|i| i.event_id == ev.id), !touching) {
-                        clicked = Some((ev.id.clone(), rect));
+                    if let Some((rect, double)) = agenda_row(ui, &p, ev, self.cal_color(&ev.calendar_id), d, highlighted.as_deref() == Some(ev.id.as_str()), !touching) {
+                        clicked = Some((ev.id.clone(), rect, double));
                     }
                 }
                 ui.add_space(space::S8);
@@ -544,8 +545,8 @@ impl CalendarCraftApp {
             self.selected_date = day;
             self.mini_month = first_of_month(day);
         }
-        if let Some((id, rect)) = clicked {
-            self.open_inspector(&id, Some(rect));
+        if let Some((id, rect, double)) = clicked {
+            self.click_event(&id, rect, double);
         }
     }
 
@@ -636,7 +637,7 @@ impl CalendarCraftApp {
 
 /// One event in the list. No hover tint while a finger is down (it would chase the rows
 /// sliding under the finger).
-fn agenda_row(ui: &mut egui::Ui, p: &theme::Palette, ev: &CalendarEvent, color: Color32, day: NaiveDate, selected: bool, hover: bool) -> Option<Rect> {
+fn agenda_row(ui: &mut egui::Ui, p: &theme::Palette, ev: &CalendarEvent, color: Color32, day: NaiveDate, selected: bool, hover: bool) -> Option<(Rect, bool)> {
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::click());
     let painter = ui.painter_at(rect);
@@ -647,8 +648,9 @@ fn agenda_row(ui: &mut egui::Ui, p: &theme::Palette, ev: &CalendarEvent, color: 
     }
     let bar = Rect::from_min_size(Pos2::new(rect.left() + 6.0, rect.top() + 7.0), Vec2::new(3.0, rect.height() - 14.0));
     painter.rect_filled(bar, CornerRadius::same(2), color);
-    let title_pos = Pos2::new(rect.left() + 18.0, rect.top() + 13.0);
-    painter.text(title_pos, Align2::LEFT_CENTER, &ev.title, font(text::T14), p.text);
+    let text_w = (rect.width() - 24.0).max(10.0);
+    let title = elided(&painter, one_line(&ev.title), font(text::T14), p.text, text_w);
+    painter.galley(Pos2::new(rect.left() + 18.0, rect.top() + 13.0 - title.size().y / 2.0), title, p.text);
     let when = if ev.all_day || ev.start_time.is_none() {
         t("all-day").to_string()
     } else if ev.date != day && !ev.starts_on(day) {
@@ -661,11 +663,30 @@ fn agenda_row(ui: &mut egui::Ui, p: &theme::Palette, ev: &CalendarEvent, color: 
         }
     };
     let sub = match &ev.location {
-        Some(l) if !l.is_empty() => format!("{when} · {l}"),
+        Some(l) if !l.trim().is_empty() => format!("{when} · {}", one_line(l)),
         _ => when,
     };
-    painter.text(Pos2::new(rect.left() + 18.0, rect.top() + 29.0), Align2::LEFT_CENTER, sub, font(text::T12), p.text_2);
-    resp.clicked().then_some(rect)
+    let sub = elided(&painter, sub, font(text::T12), p.text_2, text_w);
+    painter.galley(Pos2::new(rect.left() + 18.0, rect.top() + 29.0 - sub.size().y / 2.0), sub, p.text_2);
+    (resp.clicked() || resp.double_clicked()).then(|| (rect, resp.double_clicked()))
+}
+
+/// Text from a multi-line field (an address, notes) on one line: lines joined with ", ",
+/// runs of spaces collapsed.
+pub(super) fn one_line(text: &str) -> String {
+    text.lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|l| l.trim_end_matches(',').to_string())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One line of `text` no wider than `width`, ending in "…" when cut.
+fn elided(painter: &egui::Painter, text: String, font_id: egui::FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text, font_id, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+    painter.layout_job(job)
 }
 
 pub fn sep(ui: &mut egui::Ui, p: &theme::Palette) {
@@ -723,4 +744,17 @@ pub fn view_select(ui: &mut egui::Ui, p: &theme::Palette, value: &mut ViewMode, 
         }
     });
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::one_line;
+
+    #[test]
+    fn addresses_with_newlines_fit_on_one_line() {
+        assert_eq!(one_line("Osteria Bella\nVia Roma 12\r\n\n  00184   Rome  "), "Osteria Bella, Via Roma 12, 00184 Rome");
+        assert_eq!(one_line("Main St 1,\nBerlin"), "Main St 1, Berlin");
+        assert_eq!(one_line("Boardroom"), "Boardroom");
+        assert_eq!(one_line("\n\n"), "");
+    }
 }

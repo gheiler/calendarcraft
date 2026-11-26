@@ -144,7 +144,7 @@ mod native_cli {
             .with_title("CalendarCraft")
             .with_inner_size(size)
             .with_min_inner_size([360.0, 560.0]);
-        if let Ok(icon) = calendarcraft::icon::load() {
+        if let Ok(icon) = calendarcraft::icon::load_for_today() {
             viewport = viewport.with_icon(icon);
         }
 

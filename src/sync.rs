@@ -177,9 +177,16 @@ impl Endpoint {
             match (resp.status, &resp.location) {
                 (301 | 302 | 303 | 307 | 308, Some(loc)) => at = caldav::resolve(&at, loc),
                 (401, _) => {
-                    return Err("the server did not accept the user name and password".into())
+                    return Err(self.http_error(
+                        "the server did not accept the user name and password",
+                        method,
+                        &at,
+                        &resp,
+                    ))
                 }
-                (403, _) => return Err("the server refused access".into()),
+                (403, _) => {
+                    return Err(self.http_error("the server refused access", method, &at, &resp))
+                }
                 _ => return Ok((at, resp)),
             }
         }
@@ -196,14 +203,102 @@ impl Endpoint {
             .send("PROPFIND", url, Some(depth), Some(body.to_string()), &[])
             .await?;
         if resp.status != 207 {
-            return Err(format!(
-                "{} answered {} to PROPFIND",
-                net::host_of(&at),
-                resp.status
-            ));
+            let summary = format!("{} answered {} to PROPFIND", net::host_of(&at), resp.status);
+            return Err(self.http_error(&summary, "PROPFIND", &at, &resp));
         }
         Ok((at.clone(), caldav::parse_multistatus(&resp.body)?))
     }
+
+    /// `summary`, then (after a blank line) what the server answered: the HTTP status, the
+    /// method, host and path asked, and the start of its reply. Never the password.
+    fn http_error(&self, summary: &str, method: &str, url: &str, resp: &HttpResponse) -> String {
+        let password = self.auth.as_ref().map(|(_, p)| p.as_str());
+        error_with_details(summary, method, url, resp.status, &resp.body, password)
+    }
+}
+
+/// Join a short message and its details (see [`split_error`]).
+pub fn error_with_details(
+    summary: &str,
+    method: &str,
+    url: &str,
+    status: u16,
+    body: &str,
+    password: Option<&str>,
+) -> String {
+    let mut lines = vec![
+        format!("HTTP status: {status}{}", reason(status).map(|r| format!(" {r}")).unwrap_or_default()),
+        format!("Request: {method} {}", endpoint_of(url)),
+    ];
+    let said = server_message(body, password);
+    lines.push(format!(
+        "Server said: {}",
+        if said.is_empty() { "(nothing)".to_string() } else { said }
+    ));
+    format!("{summary}\n\n{}", lines.join("\n"))
+}
+
+/// The short message and the details below it, if any.
+pub fn split_error(what: &str) -> (&str, Option<&str>) {
+    match what.split_once("\n\n") {
+        Some((summary, details)) => (summary, Some(details)),
+        None => (what, None),
+    }
+}
+
+fn reason(status: u16) -> Option<&'static str> {
+    Some(match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        412 => "Precondition Failed",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => return None,
+    })
+}
+
+/// `host/path` of a URL, without a user name, password, query or fragment.
+pub fn endpoint_of(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    format!("{host}{path}")
+}
+
+/// The server's reply as one short line: markup dropped, spaces collapsed, at most 300
+/// characters, and the password blanked out should a server echo it.
+fn server_message(body: &str, password: Option<&str>) -> String {
+    let mut text = String::with_capacity(body.len().min(4096));
+    let mut in_tag = false;
+    for c in body.chars().take(8192) {
+        match c {
+            '<' => {
+                in_tag = true;
+                text.push(' ');
+            }
+            '>' if in_tag => in_tag = false,
+            _ if in_tag => {}
+            _ => text.push(c),
+        }
+    }
+    let mut text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(pw) = password.filter(|p| p.len() >= 3) {
+        text = text.replace(pw, "•••");
+    }
+    if text.chars().count() > 300 {
+        text = text.chars().take(300).collect::<String>() + "…";
+    }
+    text
 }
 
 fn calendars_in(at: &str, list: &[DavResponse]) -> Vec<RemoteCalendar> {
@@ -291,11 +386,8 @@ pub async fn fetch_events(
         .send("REPORT", cal_url, Some("1"), Some(body), &[])
         .await?;
     if resp.status != 207 {
-        return Err(format!(
-            "{} answered {} to REPORT",
-            net::host_of(&at),
-            resp.status
-        ));
+        let summary = format!("{} answered {} to REPORT", net::host_of(&at), resp.status);
+        return Err(ep.http_error(&summary, "REPORT", &at, &resp));
     }
     let mut out = Vec::new();
     for item in caldav::parse_multistatus(&resp.body)? {
@@ -516,5 +608,33 @@ mod tests {
         assert_eq!(safe_name("abc@x.org"), "abc-x-org");
         assert_eq!(percent_decode("ada%40example.test"), "ada@example.test");
         assert_ne!(remote_id("/a.ics", 0), remote_id("/a.ics", 1));
+    }
+
+    #[test]
+    fn auth_errors_carry_status_endpoint_and_server_text_but_not_the_password() {
+        let body = "<?xml version=\"1.0\"?><error><message>Unauthorized for hunter2-secret</message></error>";
+        let what = error_with_details(
+            "the server did not accept the user name and password",
+            "PROPFIND",
+            "https://ada:hunter2-secret@p42-caldav.icloud.com/123456/principal/?token=x#frag",
+            401,
+            body,
+            Some("hunter2-secret"),
+        );
+        let (summary, details) = split_error(&what);
+        assert_eq!(summary, "the server did not accept the user name and password");
+        let details = details.expect("details");
+        assert!(details.contains("HTTP status: 401 Unauthorized"), "{details}");
+        assert!(details.contains("Request: PROPFIND p42-caldav.icloud.com/123456/principal/"), "{details}");
+        assert!(details.contains("Server said: Unauthorized for •••"), "{details}");
+        assert!(!what.contains("hunter2"), "password leaked: {what}");
+        assert!(!what.contains("token=x"), "query leaked: {what}");
+        assert!(!what.contains('<'), "markup kept: {what}");
+    }
+
+    #[test]
+    fn plain_errors_have_no_details() {
+        assert_eq!(split_error("could not reach example.com"), ("could not reach example.com", None));
+        assert_eq!(endpoint_of("https://example.com"), "example.com/");
     }
 }

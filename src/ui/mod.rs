@@ -7,7 +7,7 @@ mod popups;
 mod side;
 mod views;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime};
@@ -131,6 +131,10 @@ pub struct CalendarCraftApp {
     fonts_ready: bool,
 
     pub inspector: Option<Inspector>,
+    /// The event a single click picked (highlighted; Delete/Backspace removes it after asking).
+    pub selected_event: Option<String>,
+    /// The event the delete confirmation is asking about.
+    pub delete_confirm: Option<String>,
     pub new_event: Option<NewEvent>,
     pub settings_open: bool,
     pub settings_tab: u8,
@@ -146,6 +150,8 @@ pub struct CalendarCraftApp {
     pub banner: Option<(String, bool)>,
     banner_until: f64,
     pub status: HashMap<String, String>,
+    /// Accounts whose error details are unfolded in Settings.
+    pub error_details: HashSet<String>,
     pub busy: usize,
 
     inbox: Option<Inbox>,
@@ -191,6 +197,9 @@ pub struct CalendarCraftApp {
 
     dirty_store: bool,
     last_saved: f64,
+    /// The day the window/Dock icon shows.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    icon_day: Option<NaiveDate>,
     now: f64,
     frame: u32,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -200,6 +209,23 @@ pub struct CalendarCraftApp {
 
 pub fn today() -> NaiveDate {
     Local::now().date_naive()
+}
+
+/// What a click on an event does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventClick {
+    Select,
+    Open,
+}
+
+/// The first click selects an event; a double-click, or a click on the event already
+/// selected, opens it.
+pub fn event_click(selected: Option<&str>, id: &str, double: bool) -> EventClick {
+    if double || selected == Some(id) {
+        EventClick::Open
+    } else {
+        EventClick::Select
+    }
 }
 
 impl CalendarCraftApp {
@@ -263,6 +289,8 @@ impl CalendarCraftApp {
             applied_style: None,
             fonts_ready: false,
             inspector: None,
+            selected_event: None,
+            delete_confirm: None,
             new_event: None,
             settings_open: false,
             settings_tab: 0,
@@ -276,6 +304,7 @@ impl CalendarCraftApp {
             banner: None,
             banner_until: 0.0,
             status: HashMap::new(),
+            error_details: HashSet::new(),
             busy: 0,
             inbox: None,
             host_inbox: Arc::new(Mutex::new(Vec::new())),
@@ -307,6 +336,7 @@ impl CalendarCraftApp {
             motion: true,
             dirty_store: false,
             last_saved: 0.0,
+            icon_day: None,
             now: 0.0,
             frame: 0,
             shot_requested: false,
@@ -542,6 +572,12 @@ impl CalendarCraftApp {
         self.store.events.retain(|e| e.id != id);
         if self.inspector.as_ref().is_some_and(|i| i.event_id == id) {
             self.inspector = None;
+        }
+        if self.selected_event.as_deref() == Some(id) {
+            self.selected_event = None;
+        }
+        if self.delete_confirm.as_deref() == Some(id) {
+            self.delete_confirm = None;
         }
         self.push_delete(&ev);
         self.dirty_store = true;
@@ -955,7 +991,8 @@ impl CalendarCraftApp {
                     .map(|a| a.name.clone())
                     .unwrap_or_default();
                 self.status.insert(account_id.clone(), what.clone());
-                self.flash(format!("{name}: {what}"), true);
+                let (summary, _) = sync::split_error(&what);
+                self.flash(format!("{name}: {summary}"), true);
                 // A refused change: read the server's version back.
                 let cals: Vec<String> = self
                     .store
@@ -1466,8 +1503,6 @@ impl CalendarCraftApp {
     }
 
     fn first_frame(&mut self, ctx: &egui::Context) {
-        #[cfg(target_os = "macos")]
-        crate::icon::set_dock_icon();
         let c = ctx.clone();
         self.inbox = Some(Inbox::new(Arc::new(move || c.request_repaint())));
         let c = ctx.clone();
@@ -1488,13 +1523,83 @@ impl CalendarCraftApp {
         }
     }
 
+    /// A click on an event: the first selects it, a second click on the selected event or a
+    /// double-click opens its details.
+    pub fn click_event(&mut self, id: &str, rect: Rect, double: bool) {
+        match event_click(self.selected_event.as_deref(), id, double) {
+            EventClick::Open => {
+                self.selected_event = Some(id.to_string());
+                // Already open: keep the draft (a third click must not drop edits).
+                if self.inspector.as_ref().is_none_or(|i| i.event_id != id) {
+                    self.open_inspector(id, Some(rect));
+                }
+            }
+            EventClick::Select => {
+                self.selected_event = Some(id.to_string());
+                if self.inspector.as_ref().is_some_and(|i| i.event_id != id) {
+                    self.inspector = None;
+                }
+            }
+        }
+    }
+
+    /// The event drawn as selected: the picked one, else the one whose details are open.
+    pub fn highlighted_event(&self) -> Option<String> {
+        self.selected_event
+            .clone()
+            .or_else(|| self.inspector.as_ref().map(|i| i.event_id.clone()))
+    }
+
+    /// Ask before deleting the selected event (or the one whose details are open).
+    fn ask_delete_selected(&mut self) {
+        let Some(id) = self.highlighted_event() else {
+            return;
+        };
+        let Some(ev) = self.store.events.iter().find(|e| e.id == id) else {
+            self.selected_event = None;
+            return;
+        };
+        if !self.calendar_writable(&ev.calendar_id) || ev.locked {
+            let why = if ev.locked {
+                t("Part of a repeating series with changes; edit it in the app that made it.")
+            } else {
+                t("This calendar is read only.")
+            };
+            self.flash(why, true);
+            return;
+        }
+        self.delete_confirm = Some(id);
+    }
+
+    /// Paint today's date on the window and Dock icon; again after midnight.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refresh_icon(&mut self, ctx: &egui::Context) {
+        let now = Local::now();
+        let day = now.date_naive();
+        if self.icon_day != Some(day) {
+            self.icon_day = Some(day);
+            if let Ok(icon) = crate::icon::load_for_date(day) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(icon))));
+            }
+            #[cfg(target_os = "macos")]
+            crate::icon::set_dock_icon_for_date(day);
+        }
+        // Wake up just after midnight even if nothing else happens.
+        let next = (day + Duration::days(1))
+            .and_hms_opt(0, 0, 1)
+            .and_then(|m| m.and_local_timezone(Local).earliest())
+            .map(|m| (m - now).to_std().unwrap_or_default())
+            .unwrap_or(std::time::Duration::from_secs(3600));
+        ctx.request_repaint_after(next);
+    }
+
     pub fn is_mobile(&self, ctx: &egui::Context) -> bool {
         ctx.screen_rect().width() < 720.0
     }
 
     pub fn keyboard(&mut self, ctx: &egui::Context) {
         let typing = ctx.wants_keyboard_input();
-        let (esc, n, t_key, left, right, save, sidebar) = ctx.input(|i| {
+        let (esc, n, t_key, left, right, save, sidebar, delete) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Escape),
                 // ⌘N natively; browsers keep Ctrl/⌘N for a new window, so N or C alone too.
@@ -1507,16 +1612,30 @@ impl CalendarCraftApp {
                 !i.modifiers.any() && i.key_pressed(egui::Key::ArrowRight),
                 i.modifiers.command && i.key_pressed(egui::Key::S),
                 i.modifiers.command && i.key_pressed(egui::Key::Backslash),
+                i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
             )
         });
         if esc {
-            if self.new_event.is_some() {
+            if self.delete_confirm.is_some() {
+                self.delete_confirm = None;
+            } else if self.new_event.is_some() {
                 self.new_event = None;
             } else if self.inspector.is_some() {
                 self.inspector = None;
+            } else if self.selected_event.is_some() {
+                self.selected_event = None;
             } else {
                 self.settings_open = false;
             }
+        }
+        // Delete/Backspace removes the selected event after asking; never while typing.
+        if delete
+            && !typing
+            && self.delete_confirm.is_none()
+            && self.new_event.is_none()
+            && !self.settings_open
+        {
+            self.ask_delete_selected();
         }
         if n {
             self.open_new_event(self.selected_date, None);
@@ -1641,6 +1760,8 @@ impl eframe::App for CalendarCraftApp {
             self.banner = None;
         }
         self.ensure_range();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_icon(ctx);
         self.keyboard(ctx);
 
         if self.is_mobile(ctx) {
@@ -1654,5 +1775,19 @@ impl eframe::App for CalendarCraftApp {
         if self.dirty_store {
             ctx.request_repaint_after(std::time::Duration::from_millis(700));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{event_click, EventClick};
+
+    #[test]
+    fn first_click_selects_second_click_or_double_click_opens() {
+        assert_eq!(event_click(None, "a", false), EventClick::Select);
+        assert_eq!(event_click(Some("b"), "a", false), EventClick::Select);
+        assert_eq!(event_click(Some("a"), "a", false), EventClick::Open);
+        assert_eq!(event_click(None, "a", true), EventClick::Open);
+        assert_eq!(event_click(Some("b"), "a", true), EventClick::Open);
     }
 }

@@ -13,6 +13,10 @@ use crate::model::{AccountKind, CalendarEvent, CalendarSource, ViewMode};
 use crate::nlp::parse_quick_entry;
 use crate::theme::{self, font, font_bold, space, text, Palette};
 
+/// How far the close button reaches into the popover's padding, so its 16px cross ends on the
+/// same edge as the buttons below (the cross sits 8px inside its 32px button).
+const CLOSE_INSET: f32 = 8.0;
+
 const ALERTS: &[(Option<u32>, &str)] = &[(None, "None"), (Some(0), "At time of event"), (Some(5), "5 minutes before"), (Some(10), "10 minutes before"), (Some(15), "15 minutes before"), (Some(30), "30 minutes before"), (Some(60), "1 hour before"), (Some(1440), "1 day before")];
 const REPEATS: &[(&str, &str)] = &[("", "Never"), ("FREQ=DAILY", "Every day"), ("FREQ=WEEKLY", "Every week"), ("FREQ=MONTHLY", "Every month"), ("FREQ=YEARLY", "Every year")];
 
@@ -181,6 +185,7 @@ impl CalendarCraftApp {
         self.inspector_popover(ctx, &p);
         self.new_event_dialog(ctx, &p);
         self.settings_dialog(ctx, &p);
+        self.delete_confirm_dialog(ctx, &p);
         if let Some((msg, error)) = self.banner.clone() {
             egui::Area::new("toast".into()).order(egui::Order::Tooltip).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -24.0)).show(ctx, |ui| {
                 egui::Frame::new().fill(if error { p.danger } else { p.text }).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::symmetric(16, 10)).shadow(ctx.style().visuals.popup_shadow).show(ui, |ui| {
@@ -216,14 +221,17 @@ impl CalendarCraftApp {
             egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.line)).corner_radius(corner).shadow(ctx.style().visuals.window_shadow).inner_margin(egui::Margin::same(20)).show(ui, |ui| {
                 ui.set_width(width - 40.0);
                 ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(Vec2::new(12.0, 28.0), egui::Sense::hover());
+                    // The close button goes in first, from the right, so it sits on the frame's
+                    // padding like Save below; its 16px cross is then nudged onto that edge.
+                    let row = ui.available_rect_before_wrap();
+                    let close_rect = Rect::from_min_size(Pos2::new(row.right() - 32.0 + CLOSE_INSET, row.top()), Vec2::splat(32.0));
+                    if ui.put(close_rect, |ui: &mut egui::Ui| icon_button(ui, p, Icon::Close, t("Close"))).clicked() {
+                        close = true;
+                    }
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(12.0, 32.0), egui::Sense::hover());
                     ui.painter().circle_filled(r.center(), 6.0, color);
-                    ui.add_enabled(editable, egui::TextEdit::singleline(&mut ins.draft.title).font(font_bold(text::T18)).frame(false).desired_width(width - 100.0).hint_text(t("Title")));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_button(ui, p, Icon::Close, t("Close")).clicked() {
-                            close = true;
-                        }
-                    });
+                    let title_w = (close_rect.left() - ui.cursor().left() - 8.0).max(40.0);
+                    ui.add_enabled(editable, egui::TextEdit::singleline(&mut ins.draft.title).font(font_bold(text::T18)).frame(false).desired_width(title_w).hint_text(t("Title")));
                 });
                 ui.label(RichText::new(describe_when(&ins.draft)).font(font(text::T14)).color(p.text_2));
                 if !editable {
@@ -287,11 +295,77 @@ impl CalendarCraftApp {
         if let Some(e) = error {
             self.flash(e, true);
         }
-        if close || (outside && !self.is_mobile(ctx)) {
+        if close || (outside && !self.is_mobile(ctx) && self.delete_confirm.is_none()) {
             return;
         }
         if self.inspector.is_none() {
             self.inspector = Some(ins);
+        }
+    }
+
+    /// "Delete event?" for the selected event (Delete or Backspace).
+    fn delete_confirm_dialog(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some(id) = self.delete_confirm.clone() else { return };
+        let Some(ev) = self.store.events.iter().find(|e| e.id == id).cloned() else {
+            self.delete_confirm = None;
+            return;
+        };
+        let width = (ctx.screen_rect().width() - 32.0).min(360.0);
+        let mut cancel = false;
+        let mut delete = false;
+        let modal = egui::Modal::new("delete-confirm".into()).frame(egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.line)).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(20)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
+            ui.set_width(width - 40.0);
+            ui.label(RichText::new(t("Delete event?")).font(font_bold(text::T16)).color(p.text));
+            ui.add_space(space::S4);
+            let title = if ev.title.trim().is_empty() { t("Untitled").to_string() } else { super::side::one_line(&ev.title) };
+            ui.add(egui::Label::new(RichText::new(format!("“{title}” · {}", describe_when(&ev))).font(font(text::T14)).color(p.text_2)).wrap());
+            ui.label(RichText::new(t("This can’t be undone.")).font(font(text::T12)).color(p.text_2));
+            ui.add_space(space::S12);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new(t("Delete")).color(Color32::WHITE)).fill(p.danger).min_size(Vec2::new(0.0, 30.0))).clicked() {
+                    delete = true;
+                }
+                if ui.add(egui::Button::new(t("Cancel")).min_size(Vec2::new(0.0, 30.0))).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if delete {
+            self.delete_confirm = None;
+            self.delete_event(&id);
+        } else if cancel || modal.should_close() {
+            self.delete_confirm = None;
+        }
+    }
+
+    /// An account's error: the short message, and its details (HTTP status, host and path,
+    /// what the server said) behind an ⓘ toggle.
+    fn account_error(&mut self, ui: &mut egui::Ui, p: &Palette, account_id: &str, what: &str) {
+        let (summary, details) = crate::sync::split_error(what);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new(summary).font(font(text::T12)).color(p.danger));
+            if details.is_some() {
+                let open = self.error_details.contains(account_id);
+                let label = if open { t("Hide details") } else { t("Details") };
+                let b = egui::Button::new(RichText::new(label).font(font(text::T12)).color(p.text_2)).frame(false);
+                let info = super::icons::inline(ui, Icon::Info, 14.0, p.text_2).interact(egui::Sense::click());
+                let text = ui.add(b);
+                let text = text.on_hover_cursor(egui::CursorIcon::PointingHand);
+                if info.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() || text.clicked() {
+                    if open {
+                        self.error_details.remove(account_id);
+                    } else {
+                        self.error_details.insert(account_id.to_string());
+                    }
+                }
+            }
+        });
+        if let Some(details) = details.filter(|_| self.error_details.contains(account_id)) {
+            egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.line)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(RichText::new(details).font(egui::FontId::monospace(11.0)).color(p.text_2)).wrap().selectable(true));
+            });
         }
     }
 
@@ -506,8 +580,8 @@ impl CalendarCraftApp {
                         };
                         let detail = [kind.to_string(), acc.email.clone(), acc.server_url.clone().unwrap_or_default()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
                         ui.label(RichText::new(detail).font(font(text::T12)).color(p.text_2));
-                        if let Some(err) = self.status.get(&acc.id) {
-                            ui.label(RichText::new(err).font(font(text::T12)).color(p.danger));
+                        if let Some(err) = self.status.get(&acc.id).cloned() {
+                            self.account_error(ui, p, &acc.id, &err);
                         }
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
