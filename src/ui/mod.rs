@@ -76,6 +76,11 @@ pub struct Launch {
     pub settings: Option<u8>,
     /// Show or hide the sidebar, overriding the saved choice.
     pub sidebar: Option<bool>,
+    /// Make the sample "Personal Cloud" a CalDAV account with a long URL and no saved
+    /// password (for screenshots of the account list and the missing-password error).
+    pub caldav_sample: bool,
+    /// Open the edit form of this account in Settings › Accounts (for screenshots).
+    pub edit_account: Option<String>,
 }
 
 /// The `.ics` document the host opened (artcraftCloud's drive).
@@ -126,6 +131,33 @@ pub struct AccountForm {
     pub error: Option<String>,
 }
 
+/// Editing an existing account in Settings › Accounts. The id stays the same, so its
+/// calendars, colours and stored password stay attached. An empty password keeps the
+/// stored one.
+#[derive(Debug, Clone, Default)]
+pub struct AccountEdit {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub username: String,
+    pub password: String,
+    pub error: Option<String>,
+}
+
+/// Shown on a CalDAV account that would be asked without a password.
+pub const MISSING_PASSWORD: &str = "No saved password for this account. Enter it again in Settings › Accounts.";
+
+/// Whether a request for `acc` would go out without the password it needs: a CalDAV
+/// account with a user name, signed by this app (not by the host or its proxy), and no
+/// password in the store.
+pub fn password_missing(acc: &AccountConfig, has_password: bool, through_host: bool) -> bool {
+    acc.kind == AccountKind::Caldav
+        && !acc.host_managed
+        && !through_host
+        && !has_password
+        && acc.username.as_deref().is_some_and(|u| !u.trim().is_empty())
+}
+
 pub struct CalendarCraftApp {
     pub store: CalendarStore,
     pub launch: Launch,
@@ -166,6 +198,9 @@ pub struct CalendarCraftApp {
     host_inbox: HostInbox,
     pub host: HostConfig,
     pub secrets: BTreeMap<String, String>,
+    /// The password store has been read (until then a missing password is not an error yet).
+    pub secrets_ready: bool,
+    pub account_edit: Option<AccountEdit>,
     pub file_doc: Option<FileDoc>,
     /// File-backed calendars in a host, keyed by calendar id, referenced by drive path.
     pub file_cals: HashMap<String, files::FileCal>,
@@ -286,6 +321,13 @@ impl CalendarCraftApp {
             }
         }
         Self::drop_ephemeral_file_accounts(&mut store);
+        if launch.demo && launch.caldav_sample {
+            if let Some(acc) = store.accounts.iter_mut().find(|a| a.id == "acc_personal") {
+                acc.kind = AccountKind::Caldav;
+                acc.username = Some(acc.email.clone());
+                acc.server_url = Some("https://p142-caldav.icloud.com/1234567890/calendars/home/family-and-travel-shared-with-everyone/".into());
+            }
+        }
         // Passwords are loaded in first_frame (and a leftover plaintext file is migrated then).
         let secrets: BTreeMap<String, String> = BTreeMap::new();
         let view_mode = launch.view.unwrap_or(prefs.view);
@@ -321,6 +363,8 @@ impl CalendarCraftApp {
             banner: None,
             banner_until: 0.0,
             status: HashMap::new(),
+            secrets_ready: false,
+            account_edit: None,
             error_details: HashSet::new(),
             busy: 0,
             inbox: None,
@@ -684,13 +728,28 @@ impl CalendarCraftApp {
     // -----------------------------------------------------------------------------------------
     // Accounts and syncing
 
+    fn through_host(&self, acc: &AccountConfig) -> bool {
+        // In a browser, servers on other origins go through the host's proxy when it has one.
+        cfg!(target_arch = "wasm32")
+            && !acc.host_managed
+            && (acc.via_proxy || acc.server_url.as_deref().is_some_and(|b| !b.starts_with('/')))
+            && self.host.remote_proxy.is_some()
+    }
+
+    /// The account needs a password this device does not have (or has not loaded yet).
+    pub fn needs_password(&self, acc: &AccountConfig) -> bool {
+        password_missing(acc, self.secrets.contains_key(&acc.id), self.through_host(acc))
+    }
+
+    /// Where to send requests for `acc`, or `None` when they cannot go out yet. A CalDAV
+    /// account whose password is missing gets no endpoint, so nothing is sent without
+    /// the Authorization header it needs.
     pub fn endpoint(&self, acc: &AccountConfig) -> Option<Endpoint> {
         let base = acc.server_url.clone()?;
-        // In a browser, servers on other origins go through the host's proxy when it has one.
-        let through_host = cfg!(target_arch = "wasm32")
-            && !acc.host_managed
-            && (acc.via_proxy || !base.starts_with('/'))
-            && self.host.remote_proxy.is_some();
+        if self.needs_password(acc) {
+            return None;
+        }
+        let through_host = self.through_host(acc);
         let auth = if through_host {
             None
         } else {
@@ -761,6 +820,13 @@ impl CalendarCraftApp {
                 for id in ids {
                     self.request_file_load(&id);
                 }
+            }
+            return;
+        }
+        if self.needs_password(&acc) {
+            // Wait for the store on start; after that, say what is missing.
+            if self.secrets_ready {
+                self.status.insert(acc.id.clone(), t(MISSING_PASSWORD).to_string());
             }
             return;
         }
@@ -1192,6 +1258,51 @@ impl CalendarCraftApp {
         }
     }
 
+    pub fn start_account_edit(&mut self, id: &str) {
+        let Some(acc) = self.store.accounts.iter().find(|a| a.id == id) else {
+            return;
+        };
+        self.account_edit = Some(AccountEdit {
+            id: acc.id.clone(),
+            name: acc.name.clone(),
+            url: acc.server_url.clone().unwrap_or_default(),
+            username: acc.username.clone().unwrap_or_default(),
+            password: String::new(),
+            error: None,
+        });
+    }
+
+    /// Apply the edit form to the account it was opened for, keeping its id.
+    pub fn save_account_edit(&mut self) {
+        let Some(edit) = self.account_edit.clone() else {
+            return;
+        };
+        let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == edit.id) else {
+            self.account_edit = None;
+            return;
+        };
+        if let Err(e) = apply_account_edit(acc, &edit) {
+            if let Some(f) = self.account_edit.as_mut() {
+                f.error = Some(e);
+            }
+            return;
+        }
+        let (id, username) = (acc.id.clone(), acc.username.clone().unwrap_or_default());
+        self.account_edit = None;
+        self.dirty_store = true;
+        self.status.remove(&id);
+        self.error_details.remove(&id);
+        let cals: Vec<String> = self.store.calendars.iter().filter(|c| c.account_id == id).map(|c| c.id.clone()).collect();
+        for c in &cals {
+            self.loaded.remove(c);
+        }
+        if !edit.password.is_empty() {
+            self.save_password(&id, &username, &edit.password);
+        } else {
+            self.refresh_account(&id);
+        }
+    }
+
     pub fn remove_account(&mut self, id: &str) {
         let cals: Vec<String> = self
             .store
@@ -1432,6 +1543,11 @@ impl CalendarCraftApp {
             self.settings_open = true;
             self.settings_tab = tab;
         }
+        if let Some(id) = self.launch.edit_account.clone() {
+            self.settings_open = true;
+            self.settings_tab = 1;
+            self.start_account_edit(&id);
+        }
         self.start_host_file_setup();
     }
 
@@ -1608,6 +1724,25 @@ fn prefers_reduced_motion() -> bool {
     false
 }
 
+/// Copy the edit form onto `acc`. The id, kind and calendars are left alone; the password is
+/// not part of the account (an empty field keeps the stored one).
+pub fn apply_account_edit(acc: &mut AccountConfig, edit: &AccountEdit) -> Result<(), String> {
+    let url = edit.url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("webcal://")) {
+        return Err(t("Enter the server address, starting with https://").into());
+    }
+    acc.server_url = Some(url.to_string());
+    acc.name = if edit.name.trim().is_empty() { crate::net::host_of(url) } else { edit.name.trim().to_string() };
+    if acc.kind == AccountKind::Caldav {
+        let user = edit.username.trim();
+        acc.username = Some(user.to_string()).filter(|u| !u.is_empty());
+        if !user.is_empty() {
+            acc.email = user.to_string();
+        }
+    }
+    Ok(())
+}
+
 pub fn first_of_month(d: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap_or(d)
 }
@@ -1664,6 +1799,7 @@ impl eframe::App for CalendarCraftApp {
             match m {
                 SyncMsg::SecretsReady { map } => {
                     self.secrets = map;
+                    self.secrets_ready = true;
                     self.refresh_all();
                 }
                 SyncMsg::SecretSaved { account_id } => self.refresh_account(&account_id),
@@ -1713,7 +1849,61 @@ impl eframe::App for CalendarCraftApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{event_click, EventClick};
+    use super::{apply_account_edit, event_click, password_missing, AccountEdit, EventClick};
+    use crate::model::{AccountConfig, AccountKind};
+
+    fn icloud() -> AccountConfig {
+        AccountConfig {
+            id: "acc_icloud".into(),
+            name: "iCloud".into(),
+            kind: AccountKind::Caldav,
+            username: Some("ada@icloud.com".into()),
+            server_url: Some("https://caldav.icloud.com/".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn caldav_without_a_saved_password_is_not_asked() {
+        let acc = icloud();
+        assert!(password_missing(&acc, false, false));
+        assert!(!password_missing(&acc, true, false));
+        // The host's proxy or the host itself attaches the password.
+        assert!(!password_missing(&acc, false, true));
+        assert!(!password_missing(&AccountConfig { host_managed: true, ..icloud() }, false, false));
+        // Subscriptions, local calendars and anonymous servers need none.
+        assert!(!password_missing(&AccountConfig { kind: AccountKind::Ics, ..icloud() }, false, false));
+        assert!(!password_missing(&AccountConfig { username: None, ..icloud() }, false, false));
+        assert!(!password_missing(&AccountConfig { username: Some("  ".into()), ..icloud() }, false, false));
+    }
+
+    #[test]
+    fn editing_an_account_keeps_its_id_and_checks_the_address() {
+        let mut acc = icloud();
+        let edit = AccountEdit {
+            id: acc.id.clone(),
+            name: "  Family iCloud ".into(),
+            url: " https://p42-caldav.icloud.com/123/ ".into(),
+            username: "ada@me.com".into(),
+            password: String::new(),
+            error: None,
+        };
+        apply_account_edit(&mut acc, &edit).unwrap();
+        assert_eq!(acc.id, "acc_icloud");
+        assert_eq!(acc.name, "Family iCloud");
+        assert_eq!(acc.server_url.as_deref(), Some("https://p42-caldav.icloud.com/123/"));
+        assert_eq!(acc.username.as_deref(), Some("ada@me.com"));
+        assert_eq!(acc.kind, AccountKind::Caldav);
+
+        let before = acc.clone();
+        let bad = AccountEdit { url: "caldav.icloud.com".into(), ..edit.clone() };
+        assert!(apply_account_edit(&mut acc, &bad).is_err());
+        assert_eq!(acc.server_url, before.server_url, "a rejected edit changes nothing");
+
+        let unnamed = AccountEdit { name: String::new(), ..edit };
+        apply_account_edit(&mut acc, &unnamed).unwrap();
+        assert_eq!(acc.name, "p42-caldav.icloud.com");
+    }
 
     #[test]
     fn first_click_selects_second_click_or_double_click_opens() {

@@ -203,6 +203,7 @@ mod native_cli {
             language: args.lang.clone(),
             settings: args.settings.as_deref().map(|t| u8::from(t == "accounts")),
             sidebar: args.sidebar.map(|v| v != 0),
+            ..Default::default()
         };
         eframe::run_native(
             "CalendarCraft",

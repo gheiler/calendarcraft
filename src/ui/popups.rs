@@ -6,7 +6,7 @@ use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rec
 
 use super::icons::Icon;
 use super::side::{icon_button, segmented, view_select};
-use super::{parse_hhmm, today, AccountForm, CalendarCraftApp, Inspector, NewEvent};
+use super::{parse_hhmm, today, AccountForm, CalendarCraftApp, Inspector, NewEvent, MISSING_PASSWORD};
 use crate::filesync::{self, ConflictChoice};
 use crate::host;
 use crate::i18n::{self, t};
@@ -399,7 +399,13 @@ impl CalendarCraftApp {
         let (summary, details) = crate::sync::split_error(what);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(RichText::new(summary).font(font(text::T12)).color(p.danger));
+            ui.add(egui::Label::new(RichText::new(summary).font(font(text::T12)).color(p.danger)).wrap());
+            if summary == t(MISSING_PASSWORD) && self.account_edit.as_ref().is_none_or(|e| e.id != account_id) {
+                let b = egui::Button::new(RichText::new(t("Enter password")).font(font(text::T12)).color(p.primary_strong)).frame(false);
+                if ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.start_account_edit(account_id);
+                }
+            }
             if details.is_some() {
                 let open = self.error_details.contains(account_id);
                 let label = if open { t("Hide details") } else { t("Details") };
@@ -663,6 +669,10 @@ impl CalendarCraftApp {
                         if matches!(acc.kind, AccountKind::Caldav | AccountKind::Ics | AccountKind::File) && ui.button(t("Refresh")).clicked() {
                             self.refresh_account(&acc.id);
                         }
+                        let editing = self.account_edit.as_ref().is_some_and(|e| e.id == acc.id);
+                        if !acc.host_managed && !editing && matches!(acc.kind, AccountKind::Caldav | AccountKind::Ics) && ui.button(t("Edit")).clicked() {
+                            self.start_account_edit(&acc.id);
+                        }
                     });
                 });
                 let kind = match acc.kind {
@@ -684,6 +694,9 @@ impl CalendarCraftApp {
                 // Below the buttons, across the card, so a long message is not covered.
                 if let Some(err) = self.status.get(&acc.id).cloned() {
                     self.account_error(ui, p, &acc.id, &err);
+                }
+                if self.account_edit.as_ref().is_some_and(|e| e.id == acc.id) {
+                    self.account_edit_form(ui, p, &acc);
                 }
             });
         }
@@ -741,6 +754,56 @@ impl CalendarCraftApp {
             ui.data_mut(|d| d.insert_temp(id, name));
         });
         let _ = AccountForm::default;
+    }
+
+    /// The edit form inside an account's card: name, address and, for CalDAV, the user name
+    /// and a password that keeps the stored one when left empty.
+    fn account_edit_form(&mut self, ui: &mut egui::Ui, p: &Palette, acc: &crate::model::AccountConfig) {
+        let has_password = self.secrets.contains_key(&acc.id) || host::hosted();
+        let caldav = acc.kind == AccountKind::Caldav;
+        let mut save = false;
+        let mut cancel = false;
+        let Some(f) = self.account_edit.as_mut() else { return };
+        ui.add_space(space::S8);
+        let field_w = (ui.available_width() - 90.0 - space::S12 - 24.0).clamp(120.0, 300.0);
+        egui::Grid::new(("editacc", &acc.id)).num_columns(2).spacing([space::S12, space::S8]).show(ui, |ui| {
+            field_label(ui, p, t("Name"));
+            theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.name).hint_text(t("Work")).desired_width(field_w));
+            ui.end_row();
+            field_label(ui, p, t("Address"));
+            theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.url).hint_text("https://caldav.icloud.com").desired_width(field_w));
+            ui.end_row();
+            if caldav {
+                field_label(ui, p, t("User name"));
+                theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.username).hint_text("ada@example.org").desired_width(field_w));
+                ui.end_row();
+                field_label(ui, p, t("Password"));
+                let hint = if has_password { t("Unchanged") } else { t("Enter the password") };
+                theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.password).password(true).hint_text(hint).desired_width(field_w));
+                ui.end_row();
+            }
+        });
+        if caldav {
+            let note = if has_password { t("Leave the password empty to keep the saved one.") } else { t("No password is saved for this account.") };
+            ui.add(egui::Label::new(RichText::new(note).font(font(text::T12)).color(p.text_2)).wrap());
+        }
+        if let Some(err) = &f.error {
+            ui.add(egui::Label::new(RichText::new(err).font(font(text::T12)).color(p.danger)).wrap());
+        }
+        ui.add_space(space::S4);
+        ui.horizontal(|ui| {
+            if theme::primary_button(ui, p, t("Save")).clicked() {
+                save = true;
+            }
+            if ui.button(t("Cancel")).clicked() {
+                cancel = true;
+            }
+        });
+        if save {
+            self.save_account_edit();
+        } else if cancel {
+            self.account_edit = None;
+        }
     }
 
     fn settings_mcp(&mut self, ui: &mut egui::Ui, p: &Palette) {
