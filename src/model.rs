@@ -46,6 +46,25 @@ pub struct AppSettings {
     /// How often to check file-backed calendars in a host, in seconds. `0` means the default (120).
     #[serde(default)]
     pub file_sync_interval_secs: u32,
+    /// Set once the person picks a zone in Settings. Before 0.3.4 every new store was written
+    /// with `America/Los_Angeles` (a leftover sample default no one could see or change); a
+    /// store with that zone and no pick is moved back to the device's zone when it loads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timezone_picked: bool,
+}
+
+/// The zone every store got by mistake before 0.3.4 (see [`AppSettings::timezone_picked`]).
+const OLD_DEFAULT_TIMEZONE: &str = "America/Los_Angeles";
+
+impl AppSettings {
+    /// Undo the old hidden `America/Los_Angeles` default (only when no zone was ever picked).
+    pub fn repair_timezone(&mut self) -> bool {
+        if !self.timezone_picked && self.timezone == OLD_DEFAULT_TIMEZONE {
+            self.timezone = default_timezone();
+            return true;
+        }
+        false
+    }
 }
 
 fn default_dark_mode() -> bool {
@@ -71,10 +90,11 @@ impl Default for AppSettings {
             dark_mode: true,
             work_day_start: 8,
             work_day_end: 18,
-            timezone: "America/Los_Angeles".to_string(),
+            timezone: default_timezone(),
             default_calendar_id: "cal_work".to_string(),
             active_calendar_set: None,
             file_sync_interval_secs: 0,
+            timezone_picked: false,
         }
     }
 }
@@ -215,12 +235,16 @@ pub struct CalendarEvent {
     /// Excluded occurrence starts, in the event's own wall clock.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exdates: Vec<NaiveDateTime>,
+    /// Occurrence starts (event's wall clock) that a changed copy (`RECURRENCE-ID`) in the
+    /// same resource replaces: not shown from the series, and not written as `EXDATE`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overridden: Vec<NaiveDateTime>,
 }
 
 impl CalendarEvent {
     fn parsed_rule(&self) -> Option<crate::recur::Rule> {
         let mut rule = crate::recur::parse(self.rrule.as_deref()?)?;
-        for ex in &self.exdates {
+        for ex in self.exdates.iter().chain(&self.overridden) {
             if !rule.except.contains(ex) {
                 rule.except.push(*ex);
             }
@@ -272,8 +296,44 @@ impl CalendarEvent {
         ev.end_date = Self::exclusive_end_date(start, end);
         ev.rrule = None;
         ev.exdates.clear();
+        ev.overridden.clear();
         ev.zone = EventZone::Floating;
         ev
+    }
+
+    /// The event (its first occurrence) with date and times as they read in `display`, for an
+    /// edit form. Zone, rule and exclusions stay as they are; put edited times back with
+    /// [`CalendarEvent::times_from_display`].
+    pub fn shown_in(&self, display: DisplayTz) -> CalendarEvent {
+        let mut ev = self.clone();
+        if self.all_day || self.start_time.is_none() || self.zone.is_floating() {
+            return ev;
+        }
+        let (start, end) =
+            crate::recur::display_range(&self.zone, self.start_wall(), self.end_wall(), display);
+        ev.date = start.date();
+        ev.start_time = Some(start.time());
+        ev.end_time = Some(end.time());
+        ev.end_date = (end.date() > start.date()).then_some(end.date());
+        ev
+    }
+
+    /// Turn date and times typed in `display` back into the event's own zone, so a saved event
+    /// keeps its `TZID` and its instant (the inverse of [`CalendarEvent::shown_in`]).
+    pub fn times_from_display(&mut self, display: DisplayTz) {
+        if self.all_day || self.start_time.is_none() || self.zone.is_floating() {
+            return;
+        }
+        let start = self.start_wall();
+        let end = self.end_wall();
+        let to_event = |wall: NaiveDateTime| {
+            crate::tz::wall_in_event_zone(&self.zone, display.instant_of(wall))
+        };
+        let (s, e) = (to_event(start), to_event(end));
+        self.date = s.date();
+        self.start_time = Some(s.time());
+        self.end_time = Some(e.time());
+        self.end_date = (e.date() > s.date()).then_some(e.date());
     }
 
     /// Whether the event shows on `day`, treating written dates as local (floating / all-day,
@@ -508,6 +568,7 @@ impl CalendarStore {
     pub fn from_json_str(json: &str) -> Result<Self, String> {
         let mut store: Self =
             serde_json::from_str(json).map_err(|e| format!("Invalid config JSON: {e}"))?;
+        store.settings.repair_timezone();
         store.normalize_calendar_sets();
         Ok(store)
     }

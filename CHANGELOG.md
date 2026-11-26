@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.4
+
+- iCloud (and other CalDAV) events no longer show at the wrong time. Every store since 0.3.0 was
+  written with a hidden `America/Los_Angeles` display zone (a leftover sample default no one
+  could see or change), so in Berlin a 10:00 event showed at 01:00. The default is now the
+  device's zone, and stores with the old hidden value are moved to it when they load.
+- Settings › General › *Time zone*: "System (Europe/Berlin)" or any IANA zone.
+- `TZID`s that are not IANA names are understood: fixed offsets (`GMT+0200`, as some Apple and
+  Exchange events carry, which were read as UTC), Windows names (`W. Europe Standard Time`),
+  vendor paths (`/mozilla.org/…/Europe/Berlin`), any letter case, and a `VTIMEZONE`'s
+  `X-LIC-LOCATION`. A zone only the text's `VTIMEZONE` defines is converted with it.
+- `DTEND`, `EXDATE` and `RECURRENCE-ID` in another zone than `DTSTART` are converted.
+- A moved or changed occurrence of a repeating event (`RECURRENCE-ID`) no longer shows twice
+  (once from the series, once changed); it is not written back as an `EXDATE`.
+- `COUNT` counts occurrences taken out by `EXDATE`, as RFC 5545 says.
+- A time skipped by the spring change (02:30 on the last Sunday of March in Berlin) is read
+  with the offset before it (03:30 summer time) instead of as UTC.
+- The event form shows and saves times in the display zone; saving converts them back, so an
+  event keeps its `TZID` and does not move. New events (form and quick entry) get the display
+  zone or the device's zone as `TZID` instead of a floating time.
+
 ## 0.3.3
 
 - Search lists matches from every date under the search field, as in Fantastical: upcoming first,

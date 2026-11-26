@@ -360,7 +360,10 @@ impl CalendarCraftApp {
                 if enter {
                     let day = parsed.date;
                     let id = self.store.next_id("ev");
-                    let ev = parsed.into_event(id, &cal);
+                    let mut ev = parsed.into_event(id, &cal);
+                    if !ev.all_day {
+                        ev.zone = crate::tz::EventZone::from_settings(&self.store.settings.timezone);
+                    }
                     let title = ev.title.clone();
                     self.commit_event(ev);
                     self.select_date(day);
