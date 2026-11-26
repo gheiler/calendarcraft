@@ -12,6 +12,8 @@ pub const DEFAULT_FOLDER: &str = "Calendars";
 pub const DEFAULT_SYNC_SECS: u32 = 120;
 /// Do not poll more often than this, even if the setting is smaller.
 pub const MIN_SYNC_SECS: u32 = 15;
+/// Wait this long after a file-backed calendar becomes dirty before writing it.
+pub const AUTOSAVE_DELAY_SECS: f64 = 1.5;
 
 /// The account that groups every file-backed calendar in host mode.
 pub const ACC_FILES: &str = "acc_files";
@@ -25,6 +27,23 @@ pub enum PollAction {
     Reload,
     /// Both sides changed: do not overwrite silently.
     Conflict,
+}
+
+/// Arm, hold, or fire a debounce window for file autosave.
+///
+/// `armed_at` is `0.0` when no dirty period is in progress. The window starts on
+/// the first dirty tick, so an edit late in a session does not write immediately.
+pub fn arm_autosave(armed_at: f64, now: f64, dirty: bool, delay: f64) -> (f64, bool) {
+    if !dirty {
+        return (0.0, false);
+    }
+    if armed_at <= 0.0 {
+        return (now, false);
+    }
+    if now - armed_at < delay {
+        return (armed_at, false);
+    }
+    (now, true)
 }
 
 pub fn poll_action(local_dirty: bool, remote_etag_changed: bool) -> PollAction {
@@ -419,6 +438,18 @@ mod tests {
             }
         );
         assert!(matches!(interpret_write(500, None, Some("no".into())), WriteOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn autosave_starts_the_clock_on_first_dirty_tick() {
+        // An edit long after startup must not write on the same frame.
+        assert_eq!(arm_autosave(0.0, 30.0, true, AUTOSAVE_DELAY_SECS), (30.0, false));
+        assert_eq!(arm_autosave(30.0, 31.0, true, AUTOSAVE_DELAY_SECS), (30.0, false));
+        assert_eq!(arm_autosave(30.0, 31.5, true, AUTOSAVE_DELAY_SECS), (31.5, true));
+        // After a write (or once everything is clean) the next edit starts a new window.
+        assert_eq!(arm_autosave(31.5, 32.0, false, AUTOSAVE_DELAY_SECS), (0.0, false));
+        assert_eq!(arm_autosave(0.0, 32.0, true, AUTOSAVE_DELAY_SECS), (32.0, false));
+        assert_eq!(arm_autosave(0.0, 10.0, false, AUTOSAVE_DELAY_SECS), (0.0, false));
     }
 
     #[test]

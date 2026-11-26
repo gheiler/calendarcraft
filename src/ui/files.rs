@@ -255,13 +255,16 @@ impl CalendarCraftApp {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        if dirty.is_empty() {
+        let (armed, due) = filesync::arm_autosave(
+            self.last_file_autosave,
+            self.now,
+            !dirty.is_empty(),
+            filesync::AUTOSAVE_DELAY_SECS,
+        );
+        self.last_file_autosave = armed;
+        if !due {
             return;
         }
-        if self.now - self.last_file_autosave < 1.5 {
-            return;
-        }
-        self.last_file_autosave = self.now;
         for id in dirty {
             self.save_file_calendar(&id);
         }
