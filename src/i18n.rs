@@ -107,6 +107,21 @@ pub fn weekday_letter(d: Weekday) -> String {
 
 // en, de, es, fr, it, pt-br
 static TABLE: &[[&str; 6]] = &[
+    ["No matches", "Keine Treffer", "Sin resultados", "Aucun résultat", "Nessun risultato", "Nenhum resultado"],
+    ["Past", "Vergangen", "Pasados", "Passés", "Passati", "Passados"],
+    ["Tomorrow", "Morgen", "Mañana", "Demain", "Domani", "Amanhã"],
+    ["more – type more to narrow the search", "weitere – tippe weiter, um die Suche einzugrenzen", "más – escribe más para acotar la búsqueda", "de plus – tapez davantage pour affiner", "altri – scrivi di più per restringere la ricerca", "mais – digite mais para refinar a busca"],
+    ["All", "Alle", "Todos", "Tous", "Tutti", "Todos"],
+    ["Sets", "Sets", "Conjuntos", "Ensembles", "Gruppi", "Conjuntos"],
+    ["Edit sets", "Sets bearbeiten", "Editar conjuntos", "Modifier les ensembles", "Modifica gruppi", "Editar conjuntos"],
+    ["New set", "Neues Set", "Nuevo conjunto", "Nouvel ensemble", "Nuovo gruppo", "Novo conjunto"],
+    ["No calendars", "Keine Kalender", "Sin calendarios", "Aucun calendrier", "Nessun calendario", "Nenhum calendário"],
+    ["This set has no calendars left, so nothing is shown. Edit it in Settings › Sets.", "Dieses Set enthält keine Kalender mehr, daher wird nichts angezeigt. Bearbeite es unter Einstellungen › Sets.", "Este conjunto ya no tiene calendarios, así que no se muestra nada. Edítalo en Ajustes › Conjuntos.", "Cet ensemble n’a plus de calendrier, rien n’est affiché. Modifiez-le dans Réglages › Ensembles.", "Questo gruppo non ha più calendari, quindi non viene mostrato nulla. Modificalo in Impostazioni › Gruppi.", "Este conjunto não tem mais calendários, então nada é exibido. Edite-o em Ajustes › Conjuntos."],
+    ["A set shows only the calendars you pick, such as Work or Family. Its pill appears in the sidebar next to All.", "Ein Set zeigt nur die Kalender, die du auswählst, etwa Arbeit oder Familie. Seine Schaltfläche erscheint in der Seitenleiste neben Alle.", "Un conjunto muestra solo los calendarios que elijas, como Trabajo o Familia. Su botón aparece en la barra lateral junto a Todos.", "Un ensemble n’affiche que les calendriers choisis, comme Travail ou Famille. Son bouton apparaît dans la barre latérale à côté de Tous.", "Un gruppo mostra solo i calendari che scegli, come Lavoro o Famiglia. Il suo pulsante compare nella barra laterale accanto a Tutti.", "Um conjunto mostra só os calendários que você escolher, como Trabalho ou Família. O botão dele aparece na barra lateral ao lado de Todos."],
+    ["Delete this set? Its calendars and events stay.", "Dieses Set löschen? Kalender und Termine bleiben erhalten.", "¿Eliminar este conjunto? Sus calendarios y eventos se conservan.", "Supprimer cet ensemble ? Ses calendriers et événements sont conservés.", "Eliminare questo gruppo? Calendari ed eventi restano.", "Excluir este conjunto? Os calendários e eventos continuam."],
+    ["Add a calendar account first.", "Füge zuerst ein Kalenderkonto hinzu.", "Añade primero una cuenta de calendario.", "Ajoutez d’abord un compte de calendrier.", "Aggiungi prima un account calendario.", "Adicione primeiro uma conta de calendário."],
+    ["Give the set a name.", "Gib dem Set einen Namen.", "Ponle un nombre al conjunto.", "Donnez un nom à l’ensemble.", "Dai un nome al gruppo.", "Dê um nome ao conjunto."],
+    ["Pick at least one calendar.", "Wähle mindestens einen Kalender.", "Elige al menos un calendario.", "Choisissez au moins un calendrier.", "Scegli almeno un calendario.", "Escolha pelo menos um calendário."],
     ["Day", "Tag", "Día", "Jour", "Giorno", "Dia"],
     ["Week", "Woche", "Semana", "Semaine", "Settimana", "Semana"],
     ["Month", "Monat", "Mes", "Mois", "Mese", "Mês"],

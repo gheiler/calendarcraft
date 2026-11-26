@@ -65,7 +65,7 @@ mod native_cli {
         #[arg(long)]
         pub new_event: bool,
 
-        /// Open Settings on a tab: general or accounts (for screenshots)
+        /// Open Settings on a tab: general, accounts, sets or mcp (for screenshots)
         #[arg(long)]
         pub settings: Option<String>,
 
@@ -201,7 +201,12 @@ mod native_cli {
             new_event: args.new_event,
             demo: args.demo,
             language: args.lang.clone(),
-            settings: args.settings.as_deref().map(|t| u8::from(t == "accounts")),
+            settings: args.settings.as_deref().map(|t| match t {
+                "accounts" => 1,
+                "sets" => 2,
+                "mcp" => 3,
+                _ => 0,
+            }),
             sidebar: args.sidebar.map(|v| v != 0),
             ..Default::default()
         };

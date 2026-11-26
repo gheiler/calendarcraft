@@ -116,7 +116,6 @@ impl CalendarCraftApp {
             visible: true,
             ..Default::default()
         });
-        self.add_to_all_set(&id);
         self.dirty_store = true;
     }
 
@@ -453,7 +452,6 @@ impl CalendarCraftApp {
                             ..Default::default()
                         },
                     );
-                    self.add_to_all_set(cal_id);
                 }
                 let first = cal
                     .events
@@ -522,7 +520,6 @@ impl CalendarCraftApp {
                 file_etag: reply.etag.clone(),
                 ..Default::default()
             });
-            self.add_to_all_set(&cal_id);
         } else if let Some(c) = self.store.calendars.iter_mut().find(|c| c.id == cal_id) {
             c.file_id = Some(path.clone());
             c.file_etag = reply.etag.clone();
@@ -582,7 +579,6 @@ impl CalendarCraftApp {
                 file_etag: reply.etag.clone(),
                 ..Default::default()
             });
-            self.add_to_all_set(&new_id);
         }
         self.file_cals.insert(
             new_id.clone(),

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.3
+
+- Search lists matches from every date under the search field, as in Fantastical: upcoming first,
+  then past, grouped by day with time, title and calendar colour and name. Words are AND-ed and
+  matched in title, location, notes, attendees and calendar name, ignoring case and accents. A
+  repeating event shows its next three occurrences and its last past one; 50 results, then
+  "+N more". ↑/↓ select, Enter or a click goes to the day and opens the event, Esc closes. Works
+  in every toolbar width, next to Day/Month on a phone and in the web build. The calendar grid
+  is no longer filtered while typing.
+- Calendar sets are yours now. The sample "Work Focus" and "Home & Personal" sets are gone (old
+  stores drop them unless they were changed), and "All" is computed instead of a stored list, so
+  new calendars can no longer be left out. Settings › Sets creates, edits, renames and deletes
+  sets (with a confirmation); a set needs a name and at least one calendar. The pills show only
+  once a set exists, and a set that lost all its calendars shows nothing, with a hint, instead
+  of everything. The MCP `set_calendar_set` tool takes `set_all` for All.
+- Saturday and Sunday have a faint blue background and blue weekday names in Month and Week
+  (and Quarter), in light and dark.
+- Month: days outside the month are clearly darker grey, with lighter numbers and faded events.
+
 ## 0.3.2
 
 - Desktop passwords are really stored in the OS credential store now. keyring was built without

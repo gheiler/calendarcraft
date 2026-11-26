@@ -111,6 +111,22 @@ fn draw_line(painter: &egui::Painter, p: &Palette, rect: Rect, color: Color32, e
     clip.text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, &ev.title, font(size), p.text);
 }
 
+/// Saturday and Sunday (the week starts on Monday throughout the app).
+pub(super) fn is_weekend(d: chrono::Weekday) -> bool {
+    matches!(d, chrono::Weekday::Sat | chrono::Weekday::Sun)
+}
+
+/// A Month cell's background: outside the shown month dimmer than anything in it, weekends tinted.
+pub(super) fn day_fill(p: &Palette, d: NaiveDate, in_month: bool) -> Color32 {
+    if !in_month {
+        p.outside
+    } else if is_weekend(d.weekday()) {
+        p.weekend
+    } else {
+        p.surface
+    }
+}
+
 fn contrast_on(c: Color32) -> Color32 {
     let l = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
     if l > 150.0 { Color32::BLACK } else { Color32::WHITE }
@@ -160,9 +176,9 @@ impl CalendarCraftApp {
         for c in 0..7 {
             let wd = chrono::Weekday::try_from(c as u8).unwrap_or(chrono::Weekday::Mon);
             let x = area.left() + cell_w * (c as f32 + 1.0) - 10.0;
-            painter.text(Pos2::new(x, area.top() + head * 0.55), Align2::RIGHT_CENTER, i18n::weekday_short(wd).to_uppercase(), font_bold(text::T12), if c >= 5 { p.text_3 } else { p.text_2 });
+            painter.text(Pos2::new(x, area.top() + head * 0.55), Align2::RIGHT_CENTER, i18n::weekday_short(wd).to_uppercase(), font_bold(text::T12), if is_weekend(wd) { p.weekend_text } else { p.text_2 });
         }
-        // Backgrounds: weekends shaded, other months greyed, the selection tinted.
+        // Backgrounds: other months clearly dimmer, weekends tinted, the selection highlighted.
         let mut cells: Vec<(NaiveDate, Rect)> = Vec::new();
         for r in 0..rows {
             for c in 0..7 {
@@ -170,12 +186,8 @@ impl CalendarCraftApp {
                 let cell = Rect::from_min_size(Pos2::new(grid.left() + c as f32 * cell_w, y0 + r as f32 * cell_h), Vec2::new(cell_w, cell_h));
                 let fill = if d == self.selected_date {
                     p.primary_faint
-                } else if d.month() != month.month() {
-                    over(p.text, 6, p.surface)
-                } else if c >= 5 {
-                    over(p.text, 3, p.surface)
                 } else {
-                    p.surface
+                    day_fill(&p, d, d.month() == month.month())
                 };
                 grid_painter.rect_filled(cell, CornerRadius::ZERO, fill);
                 cells.push((d, cell));
@@ -205,22 +217,6 @@ impl CalendarCraftApp {
             }
             if r.double_clicked() {
                 self.open_new_event(*d, None);
-            }
-        }
-        // Day numbers.
-        for (d, cell) in &cells {
-            let pos = Pos2::new(cell.right() - 10.0, cell.top() + 15.0);
-            let in_month = d.month() == month.month();
-            let label = if d.day() == 1 { format!("{} {}", d.day(), i18n::month_short(d.month())) } else { d.day().to_string() };
-            if *d == now {
-                let galley = grid_painter.layout_no_wrap(label.clone(), font_bold(text::T14), p.on_primary_strong);
-                let w = galley.size().x.max(14.0) + 12.0;
-                let pill = Rect::from_center_size(Pos2::new(pos.x - w / 2.0 + 4.0, pos.y), Vec2::new(w, 24.0));
-                grid_painter.rect_filled(pill, CornerRadius::same(12), p.primary_strong);
-                grid_painter.text(pill.center(), Align2::CENTER_CENTER, label, font_bold(text::T14), p.on_primary_strong);
-            } else {
-                let col = if in_month { p.text } else { p.text_3 };
-                grid_painter.text(pos, Align2::RIGHT_CENTER, label, if d.day() == 1 { font_bold(text::T14) } else { font(text::T14) }, col);
             }
         }
         // Events.
@@ -286,6 +282,33 @@ impl CalendarCraftApp {
                         self.set_view(ViewMode::Day);
                     }
                 }
+            }
+        }
+        // Veil what sits on days outside the month, so they read as dimmer than the month.
+        // Premultiplied by hand: egui blends in gamma space, and `from_rgba_unmultiplied`
+        // premultiplies in linear space, which would wash a light veil out to white.
+        let a: u16 = if p.dark { 130 } else { 115 };
+        let pm = |c: u8| (c as u16 * a / 255) as u8;
+        let veil = Color32::from_rgba_premultiplied(pm(p.outside.r()), pm(p.outside.g()), pm(p.outside.b()), a as u8);
+        for (d, cell) in &cells {
+            if d.month() != month.month() && *d != self.selected_date {
+                grid_painter.rect_filled(cell.shrink(1.0), CornerRadius::ZERO, veil);
+            }
+        }
+        // Day numbers.
+        for (d, cell) in &cells {
+            let pos = Pos2::new(cell.right() - 10.0, cell.top() + 15.0);
+            let in_month = d.month() == month.month();
+            let label = if d.day() == 1 { format!("{} {}", d.day(), i18n::month_short(d.month())) } else { d.day().to_string() };
+            if *d == now {
+                let galley = grid_painter.layout_no_wrap(label.clone(), font_bold(text::T14), p.on_primary_strong);
+                let w = galley.size().x.max(14.0) + 12.0;
+                let pill = Rect::from_center_size(Pos2::new(pos.x - w / 2.0 + 4.0, pos.y), Vec2::new(w, 24.0));
+                grid_painter.rect_filled(pill, CornerRadius::same(12), p.primary_strong);
+                grid_painter.text(pill.center(), Align2::CENTER_CENTER, label, font_bold(text::T14), p.on_primary_strong);
+            } else {
+                let col = if in_month { p.text } else { p.outside_text };
+                grid_painter.text(pos, Align2::RIGHT_CENTER, label, if d.day() == 1 { font_bold(text::T14) } else { font(text::T14) }, col);
             }
         }
         if let Some((id, rect, double)) = clicked {
@@ -398,7 +421,7 @@ impl CalendarCraftApp {
             painter.text(Pos2::new(tr.right() + 6.0, title_rect.center().y), Align2::LEFT_CENTER, month.year().to_string(), font(text::T18), p.text_2);
             for c in 0..7 {
                 let wd = chrono::Weekday::try_from(c as u8).unwrap_or(chrono::Weekday::Mon);
-                painter.text(Pos2::new(left + cell_w * (c as f32 + 0.5), area.top() + title_h + head_h * 0.5), Align2::CENTER_CENTER, i18n::weekday_short(wd), font_bold(11.0), if c >= 5 { p.text_3 } else { p.text_2 });
+                painter.text(Pos2::new(left + cell_w * (c as f32 + 0.5), area.top() + title_h + head_h * 0.5), Align2::CENTER_CENTER, i18n::weekday_short(wd), font_bold(11.0), if is_weekend(wd) { p.weekend_text } else { p.text_2 });
             }
             let grid_top = area.top() + title_h + head_h;
             let first = week_start(month);
@@ -409,13 +432,13 @@ impl CalendarCraftApp {
                     let cell = Rect::from_min_size(Pos2::new(left + c as f32 * cell_w, grid_top + r as f32 * cell_h), Vec2::new(cell_w, cell_h));
                     let in_month = d.month() == month.month();
                     if !in_month {
-                        painter.rect_filled(cell, CornerRadius::ZERO, over(p.text, 6, p.surface));
+                        painter.rect_filled(cell, CornerRadius::ZERO, p.outside);
                         continue;
                     }
                     if d == self.selected_date {
                         painter.rect_filled(cell, CornerRadius::ZERO, p.primary_faint);
-                    } else if c >= 5 {
-                        painter.rect_filled(cell, CornerRadius::ZERO, over(p.text, 3, p.surface));
+                    } else if is_weekend(d.weekday()) {
+                        painter.rect_filled(cell, CornerRadius::ZERO, p.weekend);
                     }
                     let resp = ui.interact(cell, ui.id().with(("qday", d, m)), Sense::click());
                     if resp.clicked() {
@@ -523,7 +546,7 @@ impl CalendarCraftApp {
                 let cell = Rect::from_min_size(Pos2::new(block.left() + c as f32 * cell_w, block.top() + head + wd_h + r as f32 * cell_h), Vec2::new(cell_w, cell_h));
                 let center = cell.center();
                 let radius = (cell_h.min(cell_w) * 0.44).min(14.0);
-                let count = self.store.events_on_date(d, &self.search_query).len();
+                let count = self.store.events_on_date(d, "").len();
                 let mut col = if c >= 5 { p.text_2 } else { p.text };
                 if d == now {
                     painter.circle_filled(center, radius, p.primary_strong);
@@ -580,7 +603,11 @@ impl CalendarCraftApp {
                     self.select_date(d);
                 }
                 let label_pos = Pos2::new(x + 12.0, head.center().y);
-                let wd = painter.text(label_pos, Align2::LEFT_CENTER, i18n::weekday_short(d.weekday()), font(text::T14), p.text_2);
+                let tint = days > 1 && is_weekend(d.weekday());
+                if tint {
+                    painter.rect_filled(cell, CornerRadius::ZERO, p.weekend);
+                }
+                let wd = painter.text(label_pos, Align2::LEFT_CENTER, i18n::weekday_short(d.weekday()), font(text::T14), if tint { p.weekend_text } else { p.text_2 });
                 let num_pos = Pos2::new(wd.right() + 18.0, head.center().y);
                 if d == now {
                     painter.circle_filled(num_pos, 14.0, p.primary_strong);
@@ -604,6 +631,9 @@ impl CalendarCraftApp {
             for i in 0..days {
                 let d = start + Duration::days(i as i64);
                 let cell = Rect::from_min_size(Pos2::new(all_rect.left() + gutter + col_w * i as f32, all_rect.top()), Vec2::new(col_w, all_h));
+                if days > 1 && is_weekend(d.weekday()) {
+                    painter.rect_filled(cell.with_max_y(all_rect.bottom() - 1.0), CornerRadius::ZERO, p.weekend);
+                }
                 let r = ui.interact(cell, ui.id().with(("aday", d)), Sense::click());
                 if r.double_clicked() {
                     self.open_new_event(d, None);
@@ -642,6 +672,19 @@ impl CalendarCraftApp {
             );
             painter.rect_filled(Rect::from_min_max(Pos2::new(canvas.left() + gutter, canvas.top()), canvas.max), CornerRadius::ZERO, over(p.text, 4, p.surface));
             painter.rect_filled(work, CornerRadius::ZERO, p.surface);
+            // Weekend columns: the tint over working hours, a little deeper outside them.
+            if days > 1 {
+                for i in 0..days {
+                    let d = start + Duration::days(i as i64);
+                    if !is_weekend(d.weekday()) {
+                        continue;
+                    }
+                    let x = canvas.left() + gutter + col_w * i as f32;
+                    let col = Rect::from_min_size(Pos2::new(x, canvas.top()), Vec2::new(col_w, canvas.height()));
+                    painter.rect_filled(col, CornerRadius::ZERO, over(p.text, 4, p.weekend));
+                    painter.rect_filled(col.intersect(work), CornerRadius::ZERO, p.weekend);
+                }
+            }
             for h in 0..24 {
                 let y = canvas.top() + h as f32 * hour_h;
                 painter.line_segment([Pos2::new(canvas.left() + gutter, y + 0.5), Pos2::new(canvas.right(), y + 0.5)], Stroke::new(1.0_f32, p.line));

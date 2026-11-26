@@ -181,11 +181,6 @@ pub fn call_tool(store: &mut CalendarStore, name: &str, args: &Value) -> Result<
             };
             store.accounts.push(account.clone());
             store.calendars.push(calendar.clone());
-            for set in &mut store.calendar_sets {
-                if set.id == "set_all" {
-                    set.calendar_ids.push(cal_id.clone());
-                }
-            }
             Ok(json!({
                 "status": "created",
                 "account": account,
@@ -354,7 +349,11 @@ pub fn call_tool(store: &mut CalendarStore, name: &str, args: &Value) -> Result<
                 .get("set_id")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing `set_id`")?;
-            if !store.calendar_sets.iter().any(|s| s.id == set_id) {
+            if set_id == crate::model::ALL_SET_ID || set_id == "all" {
+                store.settings.active_calendar_set = None;
+                return Ok(json!({ "active_calendar_set": crate::model::ALL_SET_ID }));
+            }
+            if !store.user_sets().any(|s| s.id == set_id) {
                 return Err(format!("Calendar set not found: {set_id}"));
             }
             store.settings.active_calendar_set = Some(set_id.to_string());
@@ -364,8 +363,9 @@ pub fn call_tool(store: &mut CalendarStore, name: &str, args: &Value) -> Result<
             let cfg_val = args
                 .get("config")
                 .ok_or("Missing `config` JSON object")?;
-            let new_store: CalendarStore = serde_json::from_value(cfg_val.clone())
+            let mut new_store: CalendarStore = serde_json::from_value(cfg_val.clone())
                 .map_err(|e| format!("Invalid configuration schema: {e}"))?;
+            new_store.normalize_calendar_sets();
             *store = new_store;
             Ok(json!({
                 "status": "reloaded",
@@ -480,7 +480,7 @@ pub fn mcp_tools_schema() -> Value {
         },
         {
             "name": "set_calendar_set",
-            "description": "Activate a named Calendar Set (e.g. set_all, set_focus, set_home).",
+            "description": "Show only one calendar set (an id from list_accounts' calendar_sets), or set_all for every calendar.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

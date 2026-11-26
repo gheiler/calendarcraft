@@ -73,7 +73,7 @@ impl Default for AppSettings {
             work_day_end: 18,
             timezone: "America/Los_Angeles".to_string(),
             default_calendar_id: "cal_work".to_string(),
-            active_calendar_set: Some("set_all".to_string()),
+            active_calendar_set: None,
             file_sync_interval_secs: 0,
         }
     }
@@ -151,7 +151,20 @@ impl CalendarSource {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The built-in "All" set. It is computed (every visible calendar), never stored; older stores
+/// kept it as a list, which [`CalendarStore::normalize_calendar_sets`] drops.
+pub const ALL_SET_ID: &str = "set_all";
+
+/// The sample sets older versions created, with the calendars they held. Dropped on load
+/// unless they were changed to hold other calendars.
+const DEMO_SETS: &[(&str, &[&str])] = &[
+    ("set_focus", &["cal_work", "cal_product", "cal_studio"]),
+    ("set_home", &["cal_personal", "cal_family"]),
+];
+
+/// A named group of calendars the user made (Settings › Sets). Choosing one shows only its
+/// calendars; "All" is not one of these.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CalendarSet {
     pub id: String,
     pub name: String,
@@ -377,6 +390,41 @@ impl CalendarEvent {
         Some(self.occurrence_clone(start, end))
     }
 
+    /// Every occurrence that starts on or before `until` (display-zone dates), as floating
+    /// copies in `display` (as [`projected`] makes them). One for a single event; for a series
+    /// at most what [`crate::recur::occurrence_walls`] walks (about ten years from its start).
+    pub fn occurrences_until(&self, display: DisplayTz, until: NaiveDate) -> Vec<CalendarEvent> {
+        let start = self.start_wall();
+        let length = self.end_wall() - start;
+        let floating = self.all_day || self.zone.is_floating();
+        let walls = match self.parsed_rule() {
+            None => vec![start],
+            Some(rule) => {
+                let mut walls =
+                    crate::recur::occurrence_walls(&rule, start, until + Duration::days(2));
+                if !floating {
+                    if let Some(limit) = rule.until_utc {
+                        walls.retain(|w| crate::recur::start_instant(&self.zone, *w) <= limit);
+                    }
+                }
+                walls
+            }
+        };
+        walls
+            .into_iter()
+            .map(|wall| {
+                let end = wall + length;
+                let (s, e) = if floating {
+                    (wall, end)
+                } else {
+                    crate::recur::display_range(&self.zone, wall, end, display)
+                };
+                self.occurrence_clone(s, e)
+            })
+            .filter(|o| o.date <= until)
+            .collect()
+    }
+
     pub fn uid_or_id(&self) -> String {
         if self.uid.is_empty() {
             format!("{}@calendarcraft", self.id)
@@ -446,23 +494,68 @@ impl CalendarStore {
         Self {
             settings: AppSettings {
                 default_calendar_id: String::new(),
-                active_calendar_set: Some("set_all".into()),
+                active_calendar_set: None,
                 ..AppSettings::default()
             },
             accounts: Vec::new(),
             calendars: Vec::new(),
-            calendar_sets: vec![CalendarSet {
-                id: "set_all".into(),
-                name: "All".into(),
-                calendar_ids: Vec::new(),
-            }],
+            calendar_sets: Vec::new(),
             events: Vec::new(),
             tasks: Vec::new(),
         }
     }
 
     pub fn from_json_str(json: &str) -> Result<Self, String> {
-        serde_json::from_str(json).map_err(|e| format!("Invalid config JSON: {e}"))
+        let mut store: Self =
+            serde_json::from_str(json).map_err(|e| format!("Invalid config JSON: {e}"))?;
+        store.normalize_calendar_sets();
+        Ok(store)
+    }
+
+    /// Bring calendar sets from older stores up to date: drop the stored "All" list (All is
+    /// computed now) and the unchanged sample sets, merge duplicate ids, and fall back to All
+    /// when the active set is gone. Sets that name real calendars are kept. Idempotent.
+    pub fn normalize_calendar_sets(&mut self) {
+        self.calendar_sets.retain(|s| {
+            s.id != ALL_SET_ID
+                && !DEMO_SETS.iter().any(|(id, ids)| {
+                    s.id == *id && s.calendar_ids.iter().all(|c| ids.contains(&c.as_str()))
+                })
+        });
+        let mut seen = std::collections::HashSet::new();
+        self.calendar_sets.retain(|s| seen.insert(s.id.clone()));
+        for set in &mut self.calendar_sets {
+            let mut ids = std::collections::HashSet::new();
+            set.calendar_ids.retain(|c| ids.insert(c.clone()));
+        }
+        if self.active_user_set().is_none() {
+            self.settings.active_calendar_set = None;
+        }
+    }
+
+    /// The sets the user made (never the built-in All).
+    pub fn user_sets(&self) -> impl Iterator<Item = &CalendarSet> {
+        self.calendar_sets.iter().filter(|s| s.id != ALL_SET_ID)
+    }
+
+    /// The chosen user set, or `None` when All is showing.
+    pub fn active_user_set(&self) -> Option<&CalendarSet> {
+        let id = self.settings.active_calendar_set.as_deref()?;
+        self.user_sets().find(|s| s.id == id)
+    }
+
+    /// Calendars of `set` that still exist (a set can outlive a calendar removed elsewhere).
+    pub fn set_calendars<'a>(&'a self, set: &'a CalendarSet) -> impl Iterator<Item = &'a CalendarSource> {
+        self.calendars
+            .iter()
+            .filter(move |c| set.calendar_ids.contains(&c.id))
+    }
+
+    /// Drop a calendar from every set (when the calendar is removed).
+    pub fn forget_calendar_in_sets(&mut self, calendar_id: &str) {
+        for set in &mut self.calendar_sets {
+            set.calendar_ids.retain(|id| id != calendar_id);
+        }
     }
 
     pub fn to_json_pretty(&self) -> Result<String, String> {
@@ -529,37 +622,22 @@ impl CalendarStore {
             return false;
         }
 
-        if let Some(ref set_id) = self.settings.active_calendar_set {
-            if let Some(set) = self.calendar_sets.iter().find(|s| &s.id == set_id) {
-                if !set.calendar_ids.is_empty() {
-                    return set.calendar_ids.iter().any(|id| id == calendar_id);
-                }
-            }
+        // A chosen set shows only its calendars, even when it has none left (the sidebar
+        // says so) rather than silently showing everything.
+        match self.active_user_set() {
+            Some(set) => set.calendar_ids.iter().any(|id| id == calendar_id),
+            None => true,
         }
-        true
     }
 
     pub fn events_on_date(&self, date: NaiveDate, filter_query: &str) -> Vec<&CalendarEvent> {
-        let q = filter_query.trim().to_lowercase();
+        let terms = crate::search::terms(filter_query);
         let display = DisplayTz::parse(&self.settings.timezone);
         let mut list: Vec<&CalendarEvent> = self
             .events
             .iter()
             .filter(|ev| ev.covers_in(date, display) && self.is_calendar_visible(&ev.calendar_id))
-            .filter(|ev| {
-                if q.is_empty() {
-                    true
-                } else {
-                    ev.title.to_lowercase().contains(&q)
-                        || ev
-                            .location
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_lowercase()
-                            .contains(&q)
-                        || ev.notes.to_lowercase().contains(&q)
-                }
-            })
+            .filter(|ev| terms.is_empty() || crate::search::matches(self, ev, &terms))
             .collect();
 
         list.sort_by(|a, b| match (a.all_day, b.all_day) {
@@ -663,27 +741,8 @@ impl CalendarStore {
             },
         ];
 
-        let calendar_sets = vec![
-            CalendarSet {
-                id: "set_all".to_string(),
-                name: "All Calendars".to_string(),
-                calendar_ids: calendars.iter().map(|c| c.id.clone()).collect(),
-            },
-            CalendarSet {
-                id: "set_focus".to_string(),
-                name: "Work Focus".to_string(),
-                calendar_ids: vec![
-                    "cal_work".to_string(),
-                    "cal_product".to_string(),
-                    "cal_studio".to_string(),
-                ],
-            },
-            CalendarSet {
-                id: "set_home".to_string(),
-                name: "Home & Personal".to_string(),
-                calendar_ids: vec!["cal_personal".to_string(), "cal_family".to_string()],
-            },
-        ];
+        // No sample sets: the sidebar shows set pills only once someone makes a set.
+        let calendar_sets = Vec::new();
 
         let hm = |h: u32, m: u32| NaiveTime::from_hms_opt(h, m, 0);
 
@@ -922,5 +981,56 @@ pub fn parse_hex_color(hex: &str) -> Option<[u8; 3]> {
         Some([r, g, b])
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod set_tests {
+    use super::*;
+
+    fn set(id: &str, ids: &[&str]) -> CalendarSet {
+        CalendarSet { id: id.into(), name: id.into(), calendar_ids: ids.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn old_stores_lose_all_and_unchanged_sample_sets() {
+        let mut s = CalendarStore::sample_preloaded(NaiveDate::from_ymd_opt(2026, 11, 24).unwrap());
+        s.calendar_sets = vec![
+            set(ALL_SET_ID, &["cal_work", "cal_personal"]),
+            set("set_focus", &["cal_work", "cal_product", "cal_studio"]),
+            set("set_home", &[]),
+            set("set_mine", &["cal_personal", "cal_personal"]),
+        ];
+        s.settings.active_calendar_set = Some("set_focus".into());
+        let json = s.to_json_pretty().unwrap();
+        let s = CalendarStore::from_json_str(&json).unwrap();
+        assert_eq!(s.calendar_sets, vec![set("set_mine", &["cal_personal"])]);
+        assert_eq!(s.settings.active_calendar_set, None, "the active set is gone: All");
+        assert!(s.is_calendar_visible("cal_work"));
+    }
+
+    #[test]
+    fn changed_sample_sets_are_kept() {
+        let mut s = CalendarStore::empty();
+        s.calendar_sets = vec![set("set_home", &["cal_personal", "icloud_home"])];
+        s.settings.active_calendar_set = Some("set_home".into());
+        s.normalize_calendar_sets();
+        assert_eq!(s.calendar_sets.len(), 1);
+        assert_eq!(s.settings.active_calendar_set.as_deref(), Some("set_home"));
+    }
+
+    #[test]
+    fn an_empty_set_shows_nothing_and_all_shows_everything() {
+        let mut s = CalendarStore::sample_preloaded(NaiveDate::from_ymd_opt(2026, 11, 24).unwrap());
+        assert_eq!(s.user_sets().count(), 0, "no sample sets");
+        assert!(s.is_calendar_visible("cal_work"));
+        s.calendar_sets.push(set("work", &["cal_work"]));
+        s.settings.active_calendar_set = Some("work".into());
+        assert!(s.is_calendar_visible("cal_work"));
+        assert!(!s.is_calendar_visible("cal_personal"));
+        s.forget_calendar_in_sets("cal_work");
+        assert!(!s.is_calendar_visible("cal_work"), "an emptied set does not fall back to all");
+        s.settings.active_calendar_set = Some(ALL_SET_ID.into());
+        assert!(s.is_calendar_visible("cal_personal"));
     }
 }

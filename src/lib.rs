@@ -12,6 +12,7 @@ pub mod model;
 pub mod net;
 pub mod nlp;
 pub mod recur;
+pub mod search;
 pub mod secrets;
 pub mod sync;
 pub mod theme;
@@ -27,8 +28,9 @@ use wasm_bindgen::prelude::*;
 /// WebAssembly entry point. Page parameters: `?host=parent` (framed by a host that speaks the
 /// craft-web-host bridge), `view=month|quarter|…`, `theme=light|dark|system`, `date=2026-11-24`,
 /// `demo=1` (sample data), `lang=de`, `open=<event id>`, `select=<event id>`, `delete=1`,
-/// `new=1`, `settings=general|accounts`, `sidebar=0|1`, `caldav=1` (sample CalDAV account
-/// without a saved password), `edit=<account id>`.
+/// `new=1`, `settings=general|accounts|sets|mcp`, `sidebar=0|1`, `caldav=1` (sample CalDAV
+/// account without a saved password), `edit=<account id>`, `sets=1` (two sample calendar sets; `sets=edit` also opens the first one's form),
+/// `search=<text>` (search opened with this text).
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn wasm_start() -> Result<(), JsValue> {
@@ -43,10 +45,18 @@ pub fn wasm_start() -> Result<(), JsValue> {
         select_event: query("select"),
         confirm_delete: query("delete").is_some(),
         new_event: query("new").is_some(),
-        settings: query("settings").map(|t| u8::from(t == "accounts" || t == "1")),
+        settings: query("settings").map(|t| match t.as_str() {
+            "accounts" | "1" => 1,
+            "sets" | "2" => 2,
+            "mcp" | "3" => 3,
+            _ => 0,
+        }),
         sidebar: query("sidebar").map(|v| v != "0"),
         caldav_sample: query("caldav").is_some(),
         edit_account: query("edit"),
+        sample_sets: query("sets").is_some(),
+        edit_set: query("sets").filter(|v| v == "edit").map(|_| "set_work".to_string()),
+        search: query("search"),
         ..Default::default()
     };
     wasm_bindgen_futures::spawn_local(async move {
