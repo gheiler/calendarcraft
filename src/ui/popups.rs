@@ -194,6 +194,9 @@ fn apply_texts(ev: &mut CalendarEvent, date: &str, start: &str, end: &str) -> Re
 impl CalendarCraftApp {
     pub fn open_inspector(&mut self, id: &str, anchor: Option<Rect>) {
         let Some(ev) = self.store.events.iter().find(|e| e.id == id).cloned() else { return };
+        // The form reads and writes times in the zone the calendar is shown in (the grid's
+        // times); saving turns them back into the event's own zone.
+        let ev = ev.shown_in(self.display_tz());
         self.new_event = None;
         self.inspector = Some(Inspector {
             event_id: id.to_string(),
@@ -358,6 +361,7 @@ impl CalendarCraftApp {
             let mut ev = ins.draft.clone();
             match apply_texts(&mut ev, &ins.date_text, &ins.start_text, &ins.end_text) {
                 Ok(()) => {
+                    ev.times_from_display(self.display_tz());
                     let title = ev.title.clone();
                     self.commit_event(ev);
                     self.flash(format!("{} \"{title}\"", t("Saved")), false);
@@ -532,6 +536,7 @@ impl CalendarCraftApp {
             }
             match apply_texts(&mut ev, &ne.date_text, &ne.start_text, &ne.end_text) {
                 Ok(()) => {
+                    ev.times_from_display(self.display_tz());
                     let (day, title) = (ev.date, ev.title.clone());
                     self.commit_event(ev);
                     self.select_date(day);
@@ -614,6 +619,28 @@ impl CalendarCraftApp {
                 for (code, name) in i18n::LANGUAGES {
                     if ui.selectable_label(self.prefs.language == *code, *name).clicked() {
                         self.prefs.language = (*code).into();
+                        self.mark_changed();
+                    }
+                }
+            });
+            ui.end_row();
+            field_label(ui, p, t("Time zone"));
+            let system_name = crate::tz::system_zone().map(|z| z.name()).unwrap_or("Local");
+            let current = match crate::tz::DisplayTz::parse(&self.store.settings.timezone) {
+                crate::tz::DisplayTz::Local => format!("{} ({system_name})", t("System")),
+                crate::tz::DisplayTz::Iana(z) => z.name().to_string(),
+            };
+            theme::select(ui, p, egui::ComboBox::from_id_salt("timezone").selected_text(current).width((ui.available_width() - 8.0).clamp(120.0, 200.0)).height(320.0), |ui| {
+                let local = matches!(crate::tz::DisplayTz::parse(&self.store.settings.timezone), crate::tz::DisplayTz::Local);
+                if ui.selectable_label(local, format!("{} ({system_name})", t("System"))).clicked() {
+                    self.store.settings.timezone = "Local".into();
+                    self.store.settings.timezone_picked = true;
+                    self.mark_changed();
+                }
+                for zone in crate::tz::pickable_zones() {
+                    if ui.selectable_label(self.store.settings.timezone == zone, zone).clicked() {
+                        self.store.settings.timezone = zone.to_string();
+                        self.store.settings.timezone_picked = true;
                         self.mark_changed();
                     }
                 }

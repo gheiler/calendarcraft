@@ -164,6 +164,7 @@ static TABLE: &[[&str; 6]] = &[
     ["Date", "Datum", "Fecha", "Date", "Data", "Data"],
     ["Until", "Bis", "Hasta", "Jusqu’au", "Fino al", "Até"],
     ["same day", "gleicher Tag", "mismo día", "même jour", "stesso giorno", "mesmo dia"],
+    ["Time zone", "Zeitzone", "Zona horaria", "Fuseau horaire", "Fuso orario", "Fuso horário"],
     ["Location", "Ort", "Ubicación", "Lieu", "Luogo", "Local"],
     ["Add location", "Ort hinzufügen", "Añadir ubicación", "Ajouter un lieu", "Aggiungi luogo", "Adicionar local"],
     ["Link", "Link", "Enlace", "Lien", "Link", "Link"],

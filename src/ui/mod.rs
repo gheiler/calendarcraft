@@ -332,6 +332,8 @@ impl CalendarCraftApp {
                     .extend(cache.into_iter().filter(|e| !known.contains(&e.id)));
             }
         }
+        // Stores made before 0.3.4 carry a hidden America/Los_Angeles zone; use the device's.
+        store.settings.repair_timezone();
         Self::drop_ephemeral_file_accounts(&mut store);
         store.normalize_calendar_sets();
         if launch.demo && launch.sample_sets {
@@ -543,8 +545,13 @@ impl CalendarCraftApp {
             .map(|c| c.id.clone())
     }
 
+    /// The zone the calendar is shown in (Settings › General › Time zone).
+    pub fn display_tz(&self) -> crate::tz::DisplayTz {
+        crate::tz::DisplayTz::parse(&self.store.settings.timezone)
+    }
+
     pub fn events_on(&self, day: NaiveDate) -> Vec<CalendarEvent> {
-        let display = crate::tz::DisplayTz::parse(&self.store.settings.timezone);
+        let display = self.display_tz();
         self.store
             .events_on_date(day, "")
             .into_iter()
