@@ -14,6 +14,10 @@ use crate::model::ViewMode;
 use crate::search::{self, SearchHit, SearchResults};
 use crate::theme::{font, font_bold, space, text};
 
+const ROW_H: f32 = 44.0;
+const HEADER_H: f32 = 28.0;
+const SECTION_H: f32 = 26.0;
+
 /// What the toolbar's search field did this frame, for the results list drawn after it.
 #[derive(Default)]
 pub struct SearchUi {
@@ -28,6 +32,9 @@ pub struct SearchUi {
     cache: Option<(u64, SearchResults)>,
     /// Bring the selected row into view (after a key press).
     scroll: bool,
+    /// Results drawn last frame; a change draws a few more frames so the list fits them.
+    drawn: Option<u64>,
+    settle: u8,
 }
 
 impl CalendarCraftApp {
@@ -150,6 +157,16 @@ impl CalendarCraftApp {
         }
         let p = *self.palette();
         let results = self.search_results();
+        let drawn = self.search_ui.cache.as_ref().map(|(k, _)| *k);
+        if drawn != self.search_ui.drawn {
+            self.search_ui.drawn = drawn;
+            self.search_ui.settle = 3;
+        }
+        // The area and its scroll list take their size from the frame before.
+        if self.search_ui.settle > 0 {
+            self.search_ui.settle -= 1;
+            ctx.request_repaint();
+        }
         let screen = ctx.screen_rect();
         let mobile = self.is_mobile(ctx);
         let width = if mobile { screen.width() - 16.0 } else { 400.0_f32.min(screen.width() - 16.0) };
@@ -166,7 +183,23 @@ impl CalendarCraftApp {
                     ui.add_space(space::S8);
                     return;
                 }
-                egui::ScrollArea::vertical().id_salt("search_results_scroll").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+                // Ask for the list's own height (the area otherwise keeps the size it had for the
+                // previous query until it is drawn again).
+                let mut est = results.hits.len() as f32 * ROW_H;
+                let mut last: Option<(bool, NaiveDate)> = None;
+                for h in &results.hits {
+                    if last.is_none_or(|(up, _)| up != h.upcoming) && !h.upcoming {
+                        est += SECTION_H;
+                    }
+                    if last.is_none_or(|(up, d)| up != h.upcoming || d != h.occurrence.date) {
+                        est += HEADER_H;
+                    }
+                    last = Some((h.upcoming, h.occurrence.date));
+                }
+                if results.more > 0 {
+                    est += 32.0;
+                }
+                egui::ScrollArea::vertical().id_salt(("search_results_scroll", drawn)).max_height(max_h).min_scrolled_height(est.min(max_h)).auto_shrink([false, true]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let now = today();
                     let mut last_day: Option<NaiveDate> = None;
@@ -219,7 +252,7 @@ impl CalendarCraftApp {
         let cal = self.store.calendar_by_id(&ev.calendar_id);
         let color = self.cal_color(&ev.calendar_id);
         let w = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 44.0), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, ROW_H), Sense::click());
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         let painter = ui.painter_at(rect);
         if selected {
