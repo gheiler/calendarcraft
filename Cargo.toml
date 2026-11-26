@@ -38,7 +38,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 ab_glyph = "0.2"
 ureq = "2.12"
 pollster = "0.4"
-keyring = "3"
+# Without a platform feature keyring 3 falls back to an in-memory mock store, so a
+# password "saved" there is gone on the next start. Each feature only applies on its OS.
+# Linux uses the kernel keyring (no system libraries; kept until logout or reboot).
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Same versions eframe 0.31 / winit 0.30 already pull in; used only to set the Dock icon
