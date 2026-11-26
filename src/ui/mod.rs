@@ -164,6 +164,7 @@ pub struct CalendarCraftApp {
     pub file_conflict: Option<files::FileConflict>,
     pub migration: Option<files::MigrationNotice>,
     last_file_sync: f64,
+    last_file_autosave: f64,
     file_sync_requested: bool,
     loaded: HashMap<String, (NaiveDate, NaiveDate)>,
 
@@ -300,6 +301,7 @@ impl CalendarCraftApp {
             file_conflict: None,
             migration: None,
             last_file_sync: 0.0,
+            last_file_autosave: 0.0,
             file_sync_requested: false,
             loaded: HashMap::new(),
             mini_month: first_of_month(anchor),

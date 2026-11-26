@@ -241,6 +241,8 @@ impl CalendarCraftApp {
         if !host::hosted() || self.file_conflict.is_some() {
             return;
         }
+        // Give a moment after an edit so an external change can still be detected as a conflict,
+        // and so we do not write on every frame.
         let dirty: Vec<String> = self
             .file_cals
             .iter()
@@ -253,6 +255,13 @@ impl CalendarCraftApp {
             })
             .map(|(id, _)| id.clone())
             .collect();
+        if dirty.is_empty() {
+            return;
+        }
+        if self.now - self.last_file_autosave < 1.5 {
+            return;
+        }
+        self.last_file_autosave = self.now;
         for id in dirty {
             self.save_file_calendar(&id);
         }
@@ -868,6 +877,38 @@ impl CalendarCraftApp {
                 if let Some(err) = self.account_form.error.take() {
                     self.flash(err, true);
                 }
+            }
+            "event.add" => {
+                let title = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if title.is_empty() {
+                    return;
+                }
+                let date = args
+                    .get("date")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                    .unwrap_or(self.selected_date);
+                let calendar_id = args
+                    .get("calendar")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| self.default_calendar())
+                    .unwrap_or_default();
+                if calendar_id.is_empty() {
+                    return;
+                }
+                let ev = crate::model::CalendarEvent {
+                    id: format!("e_{}", ics::short_hash(&format!("{title}{date}{}", self.store.events.len()))),
+                    calendar_id,
+                    title: title.to_string(),
+                    date,
+                    ..Default::default()
+                };
+                self.commit_event(ev);
             }
             "calendar.create" => {
                 let name = args
