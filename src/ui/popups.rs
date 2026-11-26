@@ -547,14 +547,10 @@ impl CalendarCraftApp {
                 }
             });
             ui.add_space(space::S8);
-            // Cap the body so the modal, with its title and tabs, stays on the screen.
-            // On a wide window, ask for the height up front so the list is not squeezed
-            // (it still shrinks to fit shorter tabs).
-            let mut scroll = egui::ScrollArea::vertical().max_height(max_h);
-            if !self.is_mobile(ctx) {
-                scroll = scroll.min_scrolled_height(max_h);
-            }
-            scroll.show(ui, |ui| {
+            // Cap the body so the modal, with its title and tabs, stays on the screen, and ask
+            // for that height up front so the list is not squeezed (it still shrinks to fit
+            // shorter tabs).
+            egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, |ui| {
                 set_dialog_width(ui, content_w);
                 match self.settings_tab {
                     0 => self.settings_general(ui, p),
@@ -660,21 +656,34 @@ impl CalendarCraftApp {
         for acc in self.store.accounts.clone() {
             egui::Frame::new().fill(p.hover).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&acc.name).font(font_bold(text::T14)));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if !acc.host_managed && ui.add(egui::Button::new(RichText::new(t("Remove")).color(p.danger))).clicked() {
-                            self.remove_account(&acc.id);
-                        }
-                        if matches!(acc.kind, AccountKind::Caldav | AccountKind::Ics | AccountKind::File) && ui.button(t("Refresh")).clicked() {
-                            self.refresh_account(&acc.id);
-                        }
-                        let editing = self.account_edit.as_ref().is_some_and(|e| e.id == acc.id);
-                        if !acc.host_managed && !editing && matches!(acc.kind, AccountKind::Caldav | AccountKind::Ics) && ui.button(t("Edit")).clicked() {
-                            self.start_account_edit(&acc.id);
-                        }
+                // Name and buttons share a row on wide cards; on a phone the buttons get their
+                // own row so the name is not squeezed behind them.
+                let narrow = ui.available_width() < 380.0;
+                let buttons = |ui: &mut egui::Ui, this: &mut Self| {
+                    if !acc.host_managed && ui.add(egui::Button::new(RichText::new(t("Remove")).color(p.danger))).clicked() {
+                        this.remove_account(&acc.id);
+                    }
+                    if matches!(acc.kind, AccountKind::Caldav | AccountKind::Ics | AccountKind::File) && ui.button(t("Refresh")).clicked() {
+                        this.refresh_account(&acc.id);
+                    }
+                    let editing = this.account_edit.as_ref().is_some_and(|e| e.id == acc.id);
+                    if !acc.host_managed && !editing && matches!(acc.kind, AccountKind::Caldav | AccountKind::Ics) && ui.button(t("Edit")).clicked() {
+                        this.start_account_edit(&acc.id);
+                    }
+                };
+                if narrow {
+                    ui.add(egui::Label::new(RichText::new(&acc.name).font(font_bold(text::T14))).truncate());
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            buttons(ui, self);
+                            // What is left of the row, so a long name is cut instead of the buttons.
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                ui.add(egui::Label::new(RichText::new(&acc.name).font(font_bold(text::T14))).truncate());
+                            });
+                        });
                     });
-                });
+                }
                 let kind = match acc.kind {
                     AccountKind::Caldav if acc.host_managed => t("CalDAV · provided by artcraftCloud").to_string(),
                     AccountKind::Caldav => "CalDAV".to_string(),
@@ -690,6 +699,9 @@ impl CalendarCraftApp {
                     let tip = if url.is_empty() { detail.clone() } else { url };
                     ui.add(egui::Label::new(RichText::new(detail).font(font(text::T12)).color(p.text_2)).truncate())
                         .on_hover_text(tip);
+                }
+                if narrow {
+                    ui.horizontal(|ui| ui.with_layout(Layout::right_to_left(Align::Center), |ui| buttons(ui, self)));
                 }
                 // Below the buttons, across the card, so a long message is not covered.
                 if let Some(err) = self.status.get(&acc.id).cloned() {

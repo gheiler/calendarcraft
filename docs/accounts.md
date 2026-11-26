@@ -62,4 +62,14 @@ CalendarCraft no longer writes account passwords as a plaintext JSON map.
 | Standalone web | Encrypted with WebCrypto AES-GCM. The key is a non-extractable `CryptoKey` in IndexedDB (`calendarcraft-keys`). Only the ciphertext and nonce are in `localStorage["calendarcraft.secrets"]`. This protects a copied storage dump or a casual look at the disk; it does not protect against script running on this same origin. |
 | Inside artcraftCloud | The server keeps them sealed with its vault (ChaCha20-Poly1305, per person and account). The remote calendar proxy attaches the password on the server; it is not stored in the browser and is not sent back. |
 
-If an older `calendarcraft.secrets` plaintext map is still present, it is moved into the new store the first time the app starts, and then deleted. When the app is hosted, each leftover password is stored with the username already on that account (or the account's email if the username was never saved).
+Up to 0.3.1 the desktop app was built without keyring's platform backend, so passwords went to
+an in-memory store and were gone after a restart. If an account shows *No saved password for
+this account*, choose *Enter password* (or *Edit*) and type it again; it is kept in the
+Keychain from now on. CalendarCraft never asks a CalDAV server without the password an account
+needs. On Linux the kernel keyring is used, which keeps passwords until logout or reboot.
+
+To change an account, use *Edit* on its card: name, address, user name and password. Leave the
+password empty to keep the saved one. The account keeps its id, so its calendars, colours and
+saved password stay attached.
+
+If an older `calendarcraft.secrets` plaintext map is still present, it is moved into the new store the first time the app starts, and deleted only once every password reads back from that store. When the app is hosted, each leftover password is stored with the username already on that account (or the account's email if the username was never saved).
