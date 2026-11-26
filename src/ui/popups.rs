@@ -5,7 +5,7 @@ use chrono::{Duration, NaiveDate, NaiveTime};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rect, RichText, Stroke, Vec2};
 
 use super::icons::Icon;
-use super::side::{icon_button, segmented};
+use super::side::{icon_button, segmented, view_select};
 use super::{parse_hhmm, today, AccountForm, CalendarCraftApp, Inspector, NewEvent};
 use crate::filesync::{self, ConflictChoice};
 use crate::host;
@@ -22,6 +22,32 @@ const CLOSE_INSET: f32 = 8.0;
 const ALERTS: &[(Option<u32>, &str)] = &[(None, "None"), (Some(0), "At time of event"), (Some(5), "5 minutes before"), (Some(10), "10 minutes before"), (Some(15), "15 minutes before"), (Some(30), "30 minutes before"), (Some(60), "1 hour before"), (Some(1440), "1 day before")];
 const REPEATS: &[(&str, &str)] = &[("", "Never"), ("FREQ=DAILY", "Every day"), ("FREQ=WEEKLY", "Every week"), ("FREQ=MONTHLY", "Every month"), ("FREQ=YEARLY", "Every year")];
 
+/// Margin left on each side of a modal so it never touches the screen edge.
+const DIALOG_MARGIN: f32 = 12.0;
+/// Padding of the larger dialogs (Settings, new event, file conflict, migration).
+const DIALOG_PAD: f32 = 24.0;
+
+/// Outer width for a dialog: `preferred` on a wide screen, the screen minus margins
+/// on a phone, and never wider than the screen.
+fn dialog_outer_width(screen_w: f32, preferred: f32) -> f32 {
+    (screen_w - 2.0 * DIALOG_MARGIN).min(preferred).max(160.0)
+}
+
+/// Content width inside a dialog frame with `pad` on each side (so 2 * pad in total).
+fn dialog_content_width(screen_w: f32, preferred: f32, pad: f32) -> f32 {
+    (dialog_outer_width(screen_w, preferred) - 2.0 * pad).max(120.0)
+}
+
+/// Room left for a dialog body after chrome (title, tabs, frame padding).
+fn dialog_max_body_height(screen_h: f32, chrome: f32) -> f32 {
+    (screen_h - 2.0 * DIALOG_MARGIN - chrome).max(120.0)
+}
+
+fn set_dialog_width(ui: &mut egui::Ui, width: f32) {
+    ui.set_width(width);
+    ui.set_max_width(width);
+}
+
 /// Text fields for the editable times and dates.
 struct Texts<'a> {
     date: &'a mut String,
@@ -36,11 +62,15 @@ fn field_label(ui: &mut egui::Ui, p: &Palette, label: &str) {
 /// The fields of an event, shared by the popover and the dialog. Returns whether anything changed.
 fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: Texts, calendars: &[CalendarSource], editable: bool) -> bool {
     let mut changed = false;
+    // Widths below are the text inside a field; the SnowUI padding adds 24px to each.
+    let pad = (theme::INPUT_PADDING.left + theme::INPUT_PADDING.right) as f32;
+    let label_w = 70.0;
+    let field_w = (ui.available_width() - label_w - space::S12 - 16.0).clamp(100.0, 244.0) - pad;
     ui.add_enabled_ui(editable, |ui| {
-        egui::Grid::new(ui.id().with("fields")).num_columns(2).spacing([space::S12, space::S8]).min_col_width(70.0).show(ui, |ui| {
+        egui::Grid::new(ui.id().with("fields")).num_columns(2).spacing([space::S12, space::S8]).min_col_width(label_w).show(ui, |ui| {
             field_label(ui, p, t("Calendar"));
             let current = calendars.iter().find(|c| c.id == ev.calendar_id).map(|c| c.name.clone()).unwrap_or_else(|| t("Choose…").into());
-            theme::select(ui, p, egui::ComboBox::from_id_salt(ui.id().with("cal")).selected_text(current).width(220.0), |ui| {
+            theme::select(ui, p, egui::ComboBox::from_id_salt(ui.id().with("cal")).selected_text(current).width(field_w), |ui| {
                 for c in calendars {
                     let label = RichText::new(format!("●  {}", c.name)).color(theme::color_of(&c.color_hex));
                     if ui.selectable_label(c.id == ev.calendar_id, label).clicked() {
@@ -57,11 +87,14 @@ fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: T
 
             field_label(ui, p, t("Date"));
             ui.horizontal(|ui| {
-                changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.date).desired_width(110.0).hint_text("2026-11-24")).changed();
+                let time_w = 44.0;
+                let times = if ev.all_day { 0.0 } else { (time_w + pad) * 2.0 + 3.0 * space::S8 + 8.0 };
+                let date_w = 110.0_f32.min((field_w + pad - times - pad).max(72.0));
+                changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.date).desired_width(date_w).hint_text("2026-11-24")).changed();
                 if !ev.all_day {
-                    changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.start).desired_width(56.0).hint_text("09:00")).changed();
+                    changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.start).desired_width(time_w).hint_text("09:00")).changed();
                     ui.label("–");
-                    changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.end).desired_width(56.0).hint_text("10:00")).changed();
+                    changed |= theme::text_field(ui, p, egui::TextEdit::singleline(texts.end).desired_width(time_w).hint_text("10:00")).changed();
                 }
             });
             ui.end_row();
@@ -69,7 +102,7 @@ fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: T
             if ev.all_day {
                 field_label(ui, p, t("Until"));
                 let mut end = ev.end_date.map(|d| d.to_string()).unwrap_or_default();
-                if theme::text_field(ui, p, egui::TextEdit::singleline(&mut end).desired_width(110.0).hint_text(t("same day"))).changed() {
+                if theme::text_field(ui, p, egui::TextEdit::singleline(&mut end).desired_width(110.0_f32.min(field_w)).hint_text(t("same day"))).changed() {
                     ev.end_date = NaiveDate::parse_from_str(end.trim(), "%Y-%m-%d").ok();
                     changed = true;
                 }
@@ -78,7 +111,7 @@ fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: T
 
             field_label(ui, p, t("Location"));
             let mut loc = ev.location.clone().unwrap_or_default();
-            if theme::text_field(ui, p, egui::TextEdit::singleline(&mut loc).desired_width(220.0).hint_text(t("Add location"))).changed() {
+            if theme::text_field(ui, p, egui::TextEdit::singleline(&mut loc).desired_width(field_w).hint_text(t("Add location"))).changed() {
                 ev.location = Some(loc).filter(|l| !l.trim().is_empty());
                 changed = true;
             }
@@ -86,7 +119,7 @@ fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: T
 
             field_label(ui, p, t("Link"));
             let mut url = ev.conference_url.clone().unwrap_or_default();
-            if theme::text_field(ui, p, egui::TextEdit::singleline(&mut url).desired_width(220.0).hint_text("https://")).changed() {
+            if theme::text_field(ui, p, egui::TextEdit::singleline(&mut url).desired_width(field_w).hint_text("https://")).changed() {
                 ev.conference_url = Some(url).filter(|u| !u.trim().is_empty());
                 changed = true;
             }
@@ -94,7 +127,7 @@ fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: T
 
             field_label(ui, p, t("Alert"));
             let label = ALERTS.iter().find(|(m, _)| *m == ev.alert_minutes_before).map(|(_, l)| t(l).to_string()).unwrap_or_else(|| format!("{} min", ev.alert_minutes_before.unwrap_or(0)));
-            theme::select(ui, p, egui::ComboBox::from_id_salt(ui.id().with("alert")).selected_text(label).width(220.0), |ui| {
+            theme::select(ui, p, egui::ComboBox::from_id_salt(ui.id().with("alert")).selected_text(label).width(field_w), |ui| {
                 for (m, l) in ALERTS {
                     if ui.selectable_label(ev.alert_minutes_before == *m, t(l)).clicked() {
                         ev.alert_minutes_before = *m;
@@ -108,7 +141,7 @@ fn event_fields(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, texts: T
             let rule = ev.rrule.clone().unwrap_or_default();
             let known = REPEATS.iter().find(|(r, _)| *r == rule);
             let label = known.map(|(_, l)| t(l).to_string()).unwrap_or_else(|| t("Custom").to_string());
-            theme::select(ui, p, egui::ComboBox::from_id_salt(ui.id().with("repeat")).selected_text(label).width(220.0), |ui| {
+            theme::select(ui, p, egui::ComboBox::from_id_salt(ui.id().with("repeat")).selected_text(label).width(field_w), |ui| {
                 for (r, l) in REPEATS {
                     if ui.selectable_label(rule == *r, t(l)).clicked() {
                         ev.rrule = Some(r.to_string()).filter(|r| !r.is_empty());
@@ -194,7 +227,8 @@ impl CalendarCraftApp {
         if let Some((msg, error)) = self.banner.clone() {
             egui::Area::new("toast".into()).order(egui::Order::Tooltip).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -24.0)).show(ctx, |ui| {
                 egui::Frame::new().fill(if error { p.danger } else { p.text }).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::symmetric(16, 10)).shadow(ctx.style().visuals.popup_shadow).show(ui, |ui| {
-                    ui.label(RichText::new(msg).color(if error { Color32::WHITE } else { p.surface }));
+                    ui.set_max_width((ctx.screen_rect().width() - 48.0).min(420.0));
+                    ui.add(egui::Label::new(RichText::new(msg).color(if error { Color32::WHITE } else { p.surface })).wrap());
                 });
             });
         }
@@ -204,15 +238,18 @@ impl CalendarCraftApp {
         let Some(mut ins) = self.inspector.take() else { return };
         let screen = ctx.screen_rect();
         let mobile = self.is_mobile(ctx);
-        let width = if mobile { screen.width() } else { 360.0 };
+        // A full-width bottom sheet on a phone; a 360px popover on the desktop.
+        let width = if mobile { screen.width() } else { 360.0_f32.min(screen.width() - 16.0).max(200.0) };
+        let max_h = if mobile { (screen.height() * 0.92).min(screen.height() - 8.0) } else { (screen.height() - 16.0).min(560.0) };
+        let sheet_h = self.popup_sizes.get("inspector").map(|s| s.y.min(max_h)).unwrap_or_else(|| if mobile { (screen.height() * 0.6).min(max_h) } else { max_h });
         let editable = self.calendar_writable(&ins.draft.calendar_id) && !ins.draft.locked;
         let calendars: Vec<CalendarSource> = if editable { self.writable_calendars() } else { self.store.calendars.clone() };
         let pos = match (mobile, ins.anchor) {
-            (true, _) => Pos2::new(0.0, screen.bottom() - 560.0_f32.min(screen.height() * 0.85)),
+            (true, _) => Pos2::new(0.0, screen.bottom() - sheet_h),
             (false, Some(a)) => {
                 let right = a.right() + 10.0;
                 let x = if right + width < screen.right() - 8.0 { right } else { (a.left() - width - 10.0).max(8.0) };
-                Pos2::new(x, (a.top() - 40.0).clamp(8.0, (screen.bottom() - 560.0).max(8.0)))
+                Pos2::new(x, (a.top() - 40.0).clamp(8.0, (screen.bottom() - sheet_h).max(8.0)))
             }
             (false, None) => Pos2::new(screen.center().x - width / 2.0, screen.top() + 90.0),
         };
@@ -224,7 +261,8 @@ impl CalendarCraftApp {
         let area = egui::Area::new("inspector".into()).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
             let corner = if mobile { CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 } } else { CornerRadius::same(16) };
             egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.line)).corner_radius(corner).shadow(ctx.style().visuals.window_shadow).inner_margin(egui::Margin::same(20)).show(ui, |ui| {
-                ui.set_width(width - 40.0);
+                let inner = (width - 40.0).max(120.0);
+                set_dialog_width(ui, inner);
                 ui.horizontal(|ui| {
                     // The close button is placed by hand on the right so its 16px cross ends on the
                     // same edge as Save below (the frame's 20px padding); the title gets the rest.
@@ -245,42 +283,47 @@ impl CalendarCraftApp {
                     let title_w = (close_rect.left() - ui.cursor().left() - 8.0).max(40.0);
                     ui.add_enabled(editable, egui::TextEdit::singleline(&mut ins.draft.title).font(font_bold(text::T18)).frame(false).desired_width(title_w).hint_text(t("Title")));
                 });
-                ui.label(RichText::new(describe_when(&ins.draft)).font(font(text::T14)).color(p.text_2));
-                if !editable {
-                    let why = if ins.draft.locked { t("Part of a repeating series with changes; edit it in the app that made it.") } else { t("This calendar is read only.") };
-                    ui.horizontal(|ui| {
-                        super::icons::inline(ui, Icon::Lock, 12.0, p.text_2);
-                        ui.label(RichText::new(why).font(font(text::T12)).color(p.text_2));
-                    });
-                }
-                ui.add_space(space::S8);
-                let Inspector { draft, date_text, start_text, end_text, .. } = &mut ins;
-                event_fields(ui, p, draft, Texts { date: date_text, start: start_text, end: end_text }, &calendars, editable);
-                ui.add_space(space::S12);
-                ui.horizontal(|ui| {
-                    if editable {
-                        if ins.confirm_delete {
-                            if ui.add(egui::Button::new(RichText::new(t("Delete event")).color(Color32::WHITE)).fill(p.danger)).clicked() {
-                                delete = true;
-                            }
-                            if ui.button(t("Keep")).clicked() {
-                                ins.confirm_delete = false;
-                            }
-                        } else if ui.add(egui::Button::new(RichText::new(t("Delete")).color(p.danger)).fill(Color32::TRANSPARENT)).clicked() {
-                            ins.confirm_delete = true;
-                        }
+                // Keep the title and close button visible; scroll the fields when the sheet is tall.
+                let body_h = (max_h - 72.0).max(80.0);
+                egui::ScrollArea::vertical().max_height(body_h).show(ui, |ui| {
+                    set_dialog_width(ui, inner);
+                    ui.label(RichText::new(describe_when(&ins.draft)).font(font(text::T14)).color(p.text_2));
+                    if !editable {
+                        let why = if ins.draft.locked { t("Part of a repeating series with changes; edit it in the app that made it.") } else { t("This calendar is read only.") };
+                        ui.horizontal_wrapped(|ui| {
+                            super::icons::inline(ui, Icon::Lock, 12.0, p.text_2);
+                            ui.add(egui::Label::new(RichText::new(why).font(font(text::T12)).color(p.text_2)).wrap());
+                        });
                     }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(space::S8);
+                    let Inspector { draft, date_text, start_text, end_text, .. } = &mut ins;
+                    event_fields(ui, p, draft, Texts { date: date_text, start: start_text, end: end_text }, &calendars, editable);
+                    ui.add_space(space::S12);
+                    ui.horizontal_wrapped(|ui| {
                         if editable {
-                            if theme::primary_button(ui, p, t("Save")).clicked() {
-                                save = true;
+                            if ins.confirm_delete {
+                                if ui.add(egui::Button::new(RichText::new(t("Delete event")).color(Color32::WHITE)).fill(p.danger)).clicked() {
+                                    delete = true;
+                                }
+                                if ui.button(t("Keep")).clicked() {
+                                    ins.confirm_delete = false;
+                                }
+                            } else if ui.add(egui::Button::new(RichText::new(t("Delete")).color(p.danger)).fill(Color32::TRANSPARENT)).clicked() {
+                                ins.confirm_delete = true;
                             }
-                            if ui.button(t("Cancel")).clicked() {
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            if editable {
+                                if theme::primary_button(ui, p, t("Save")).clicked() {
+                                    save = true;
+                                }
+                                if ui.button(t("Cancel")).clicked() {
+                                    close = true;
+                                }
+                            } else if ui.button(t("Close")).clicked() {
                                 close = true;
                             }
-                        } else if ui.button(t("Close")).clicked() {
-                            close = true;
-                        }
+                        });
                     });
                 });
             });
@@ -322,11 +365,11 @@ impl CalendarCraftApp {
             self.delete_confirm = None;
             return;
         };
-        let width = (ctx.screen_rect().width() - 32.0).min(360.0);
+        let content_w = dialog_content_width(ctx.screen_rect().width(), 360.0, 20.0);
         let mut cancel = false;
         let mut delete = false;
         let modal = egui::Modal::new("delete-confirm".into()).frame(egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.line)).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(20)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
-            ui.set_width(width - 40.0);
+            set_dialog_width(ui, content_w);
             ui.label(RichText::new(t("Delete event?")).font(font_bold(text::T16)).color(p.text));
             ui.add_space(space::S4);
             let title = if ev.title.trim().is_empty() { t("Untitled").to_string() } else { super::side::one_line(&ev.title) };
@@ -386,11 +429,14 @@ impl CalendarCraftApp {
         let calendars = self.writable_calendars();
         let mut add = false;
         let mut cancel = false;
-        let mobile = self.is_mobile(ctx);
-        let width = if mobile { ctx.screen_rect().width() - 24.0 } else { 440.0 };
+        let screen = ctx.screen_rect();
+        let content_w = dialog_content_width(screen.width(), 440.0, DIALOG_PAD);
+        let max_h = dialog_max_body_height(screen.height(), 2.0 * DIALOG_PAD + 36.0);
         let modal = egui::Modal::new("new_event".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
-            ui.set_width(width - 48.0);
+            set_dialog_width(ui, content_w);
             ui.label(RichText::new(t("New event")).font(font_bold(text::T18)));
+            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+            set_dialog_width(ui, content_w);
             ui.add_space(space::S4);
             let r = theme::text_field(ui, p, egui::TextEdit::singleline(&mut ne.sentence).hint_text(t("Type it: Dinner with Ada friday 7pm at Osteria")).desired_width(f32::INFINITY));
             if !ne.focus_done {
@@ -436,6 +482,7 @@ impl CalendarCraftApp {
                     cancel = true;
                 }
             });
+            });
         });
         self.settle(ctx, "new_event", modal.response.rect.size());
         if modal.should_close() {
@@ -471,9 +518,11 @@ impl CalendarCraftApp {
         if !self.settings_open {
             return;
         }
-        let width = (ctx.screen_rect().width() - 24.0).min(620.0);
+        let screen = ctx.screen_rect();
+        let content_w = dialog_content_width(screen.width(), 620.0, DIALOG_PAD);
+        let max_h = dialog_max_body_height(screen.height(), 2.0 * DIALOG_PAD + 88.0);
         let modal = egui::Modal::new("settings".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
-            ui.set_width(width - 48.0);
+            set_dialog_width(ui, content_w);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(t("Settings")).font(font_bold(text::T18)));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -492,13 +541,20 @@ impl CalendarCraftApp {
                 }
             });
             ui.add_space(space::S8);
-            // The modal offers last frame's size as room; ask for the full height up front so
-            // the list is not squeezed into a scroll (it still shrinks to fit shorter tabs).
-            let max_h = ctx.screen_rect().height() * 0.7;
-            egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, |ui| match self.settings_tab {
-                0 => self.settings_general(ui, p),
-                1 => self.settings_accounts(ui, p),
-                _ => self.settings_mcp(ui, p),
+            // Cap the body so the modal, with its title and tabs, stays on the screen.
+            // On a wide window, ask for the height up front so the list is not squeezed
+            // (it still shrinks to fit shorter tabs).
+            let mut scroll = egui::ScrollArea::vertical().max_height(max_h);
+            if !self.is_mobile(ctx) {
+                scroll = scroll.min_scrolled_height(max_h);
+            }
+            scroll.show(ui, |ui| {
+                set_dialog_width(ui, content_w);
+                match self.settings_tab {
+                    0 => self.settings_general(ui, p),
+                    1 => self.settings_accounts(ui, p),
+                    _ => self.settings_mcp(ui, p),
+                }
             });
         });
         self.settle(ctx, "settings", modal.response.rect.size());
@@ -521,7 +577,7 @@ impl CalendarCraftApp {
             ui.end_row();
             field_label(ui, p, t("Language"));
             let current = if self.prefs.language == "auto" { t("Automatic").to_string() } else { i18n::language_name(&self.prefs.language).to_string() };
-            theme::select(ui, p, egui::ComboBox::from_id_salt("lang").selected_text(current).width(200.0), |ui| {
+            theme::select(ui, p, egui::ComboBox::from_id_salt("lang").selected_text(current).width((ui.available_width() - 8.0).clamp(120.0, 200.0)), |ui| {
                 if ui.selectable_label(self.prefs.language == "auto", t("Automatic")).clicked() {
                     self.prefs.language = "auto".into();
                     self.mark_changed();
@@ -546,7 +602,13 @@ impl CalendarCraftApp {
             ui.end_row();
             field_label(ui, p, t("Default view"));
             let mut v = self.prefs.view;
-            if segmented(ui, p, &mut v, &[ViewMode::Day, ViewMode::Week, ViewMode::Month, ViewMode::Quarter, ViewMode::Year]) {
+            let views = [ViewMode::Day, ViewMode::Week, ViewMode::Month, ViewMode::Quarter, ViewMode::Year];
+            let changed = if ui.available_width() < 420.0 {
+                view_select(ui, p, &mut v, &views)
+            } else {
+                segmented(ui, p, &mut v, &views)
+            };
+            if changed {
                 self.set_view(v);
             }
             ui.end_row();
@@ -564,7 +626,7 @@ impl CalendarCraftApp {
             field_label(ui, p, t("New events go to"));
             let cals = self.writable_calendars();
             let current = self.default_calendar().and_then(|id| cals.iter().find(|c| c.id == id).map(|c| c.name.clone())).unwrap_or_else(|| t("Choose…").into());
-            theme::select(ui, p, egui::ComboBox::from_id_salt("defcal").selected_text(current).width(200.0), |ui| {
+            theme::select(ui, p, egui::ComboBox::from_id_salt("defcal").selected_text(current).width((ui.available_width() - 8.0).clamp(120.0, 200.0)), |ui| {
                 for c in &cals {
                     if ui.selectable_label(self.store.settings.default_calendar_id == c.id, &c.name).clicked() {
                         self.store.settings.default_calendar_id = c.id.clone();
@@ -593,19 +655,7 @@ impl CalendarCraftApp {
             egui::Frame::new().fill(p.hover).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&acc.name).font(font_bold(text::T14)));
-                        let kind = match acc.kind {
-                            AccountKind::Caldav if acc.host_managed => t("CalDAV · provided by artcraftCloud"),
-                            AccountKind::Caldav => "CalDAV",
-                            AccountKind::Ics => t("Subscription (read only)"),
-                            AccountKind::File if acc.id == filesync::ACC_FILES => t("In my files"),
-                            AccountKind::File => t("Opened file"),
-                            AccountKind::Local => t("On this device"),
-                        };
-                        let detail = [kind.to_string(), acc.email.clone(), acc.server_url.clone().unwrap_or_default()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-                        ui.label(RichText::new(detail).font(font(text::T12)).color(p.text_2));
-                    });
+                    ui.label(RichText::new(&acc.name).font(font_bold(text::T14)));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if !acc.host_managed && ui.add(egui::Button::new(RichText::new(t("Remove")).color(p.danger))).clicked() {
                             self.remove_account(&acc.id);
@@ -615,6 +665,22 @@ impl CalendarCraftApp {
                         }
                     });
                 });
+                let kind = match acc.kind {
+                    AccountKind::Caldav if acc.host_managed => t("CalDAV · provided by artcraftCloud").to_string(),
+                    AccountKind::Caldav => "CalDAV".to_string(),
+                    AccountKind::Ics => t("Subscription (read only)").to_string(),
+                    AccountKind::File if acc.id == filesync::ACC_FILES => t("In my files").to_string(),
+                    AccountKind::File => t("Opened file").to_string(),
+                    AccountKind::Local => t("On this device").to_string(),
+                };
+                let url = acc.server_url.clone().unwrap_or_default();
+                let detail = [kind, acc.email.clone(), url.clone()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+                if !detail.is_empty() {
+                    // Own row, elided to the card width, so a long URL cannot run under the buttons.
+                    let tip = if url.is_empty() { detail.clone() } else { url };
+                    ui.add(egui::Label::new(RichText::new(detail).font(font(text::T12)).color(p.text_2)).truncate())
+                        .on_hover_text(tip);
+                }
                 // Below the buttons, across the card, so a long message is not covered.
                 if let Some(err) = self.status.get(&acc.id).cloned() {
                     self.account_error(ui, p, &acc.id, &err);
@@ -632,19 +698,20 @@ impl CalendarCraftApp {
                 f.kind_ics = true;
             }
         });
+        let field_w = (ui.available_width() - 90.0 - space::S12).clamp(120.0, 300.0);
         egui::Grid::new("addacc").num_columns(2).spacing([space::S12, space::S8]).show(ui, |ui| {
             field_label(ui, p, t("Name"));
-            theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.name).hint_text(t("Work")).desired_width(300.0));
+            theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.name).hint_text(t("Work")).desired_width(field_w));
             ui.end_row();
             field_label(ui, p, t("Address"));
-            theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.url).hint_text(if f.kind_ics { "https://…/calendar.ics" } else { "https://caldav.icloud.com" }).desired_width(300.0));
+            theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.url).hint_text(if f.kind_ics { "https://…/calendar.ics" } else { "https://caldav.icloud.com" }).desired_width(field_w));
             ui.end_row();
             if !f.kind_ics {
                 field_label(ui, p, t("User name"));
-                theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.username).hint_text("ada@example.org").desired_width(300.0));
+                theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.username).hint_text("ada@example.org").desired_width(field_w));
                 ui.end_row();
                 field_label(ui, p, t("Password"));
-                theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.password).password(true).hint_text(t("App password")).desired_width(300.0));
+                theme::text_field(ui, p, egui::TextEdit::singleline(&mut f.password).password(true).hint_text(t("App password")).desired_width(field_w));
                 ui.end_row();
             }
         });
@@ -652,9 +719,9 @@ impl CalendarCraftApp {
             ui.label(RichText::new(err).color(p.danger));
         }
         let connect = theme::primary_button(ui, p, t("Connect")).clicked();
-        ui.label(RichText::new(t("iCloud: https://caldav.icloud.com with an app-specific password. Fastmail: https://caldav.fastmail.com. Nextcloud: https://<server>/remote.php/dav. Google needs a sign-in CalendarCraft cannot do yet: add its secret iCal address as a subscription instead.")).font(font(text::T12)).color(p.text_2));
+        ui.add(egui::Label::new(RichText::new(t("iCloud: https://caldav.icloud.com with an app-specific password. Fastmail: https://caldav.fastmail.com. Nextcloud: https://<server>/remote.php/dav. Google needs a sign-in CalendarCraft cannot do yet: add its secret iCal address as a subscription instead.")).font(font(text::T12)).color(p.text_2)).wrap());
         if cfg!(target_arch = "wasm32") && self.host.remote_proxy.is_none() {
-            ui.label(RichText::new(t("In a plain browser page most servers refuse to answer (CORS). Inside artcraftCloud the requests go through its proxy.")).font(font(text::T12)).color(p.text_2));
+            ui.add(egui::Label::new(RichText::new(t("In a plain browser page most servers refuse to answer (CORS). Inside artcraftCloud the requests go through its proxy.")).font(font(text::T12)).color(p.text_2)).wrap());
         }
         if connect {
             self.add_account_from_form();
@@ -665,7 +732,8 @@ impl CalendarCraftApp {
         ui.horizontal(|ui| {
             let id = ui.id().with("localname");
             let mut name: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
-            theme::text_field(ui, p, egui::TextEdit::singleline(&mut name).hint_text(t("Personal")).desired_width(220.0));
+            let name_w = (ui.available_width() - 100.0).clamp(100.0, 220.0);
+            theme::text_field(ui, p, egui::TextEdit::singleline(&mut name).hint_text(t("Personal")).desired_width(name_w));
             if ui.button(t("Create")).clicked() && !name.trim().is_empty() {
                 self.add_local_calendar(name.trim());
                 name.clear();
@@ -698,22 +766,27 @@ impl CalendarCraftApp {
             return;
         }
         let name = self.file_conflict.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+        let content_w = dialog_content_width(ctx.screen_rect().width(), 420.0, DIALOG_PAD);
+        let max_h = dialog_max_body_height(ctx.screen_rect().height(), 2.0 * DIALOG_PAD);
         let modal = egui::Modal::new("file_conflict".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.label(RichText::new(t("Someone else changed this calendar. Choose how to continue.")).font(font_bold(text::T16)));
-            ui.add_space(space::S8);
-            ui.label(RichText::new(format!("{name}\n{}", t("This file changed on another device or tab."))).font(font(text::T14)).color(p.text_2));
-            ui.add_space(space::S16);
-            ui.horizontal(|ui| {
-                if ui.button(t("Reload theirs")).clicked() {
-                    self.resolve_file_conflict(ConflictChoice::ReloadTheirs);
-                }
-                if theme::primary_button(ui, p, t("Keep mine")).clicked() {
-                    self.resolve_file_conflict(ConflictChoice::KeepMine);
-                }
-                if ui.button(t("Save a copy")).clicked() {
-                    self.resolve_file_conflict(ConflictChoice::SaveACopy);
-                }
+            set_dialog_width(ui, content_w);
+            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                set_dialog_width(ui, content_w);
+                ui.add(egui::Label::new(RichText::new(t("Someone else changed this calendar. Choose how to continue.")).font(font_bold(text::T16))).wrap());
+                ui.add_space(space::S8);
+                ui.add(egui::Label::new(RichText::new(format!("{name}\n{}", t("This file changed on another device or tab."))).font(font(text::T14)).color(p.text_2)).wrap());
+                ui.add_space(space::S16);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(t("Reload theirs")).clicked() {
+                        self.resolve_file_conflict(ConflictChoice::ReloadTheirs);
+                    }
+                    if theme::primary_button(ui, p, t("Keep mine")).clicked() {
+                        self.resolve_file_conflict(ConflictChoice::KeepMine);
+                    }
+                    if ui.button(t("Save a copy")).clicked() {
+                        self.resolve_file_conflict(ConflictChoice::SaveACopy);
+                    }
+                });
             });
         });
         let _ = modal;
@@ -726,21 +799,26 @@ impl CalendarCraftApp {
         }
         let saved = m.saved.clone();
         let failed = m.failed.clone();
+        let content_w = dialog_content_width(ctx.screen_rect().width(), 420.0, DIALOG_PAD);
+        let max_h = dialog_max_body_height(ctx.screen_rect().height(), 2.0 * DIALOG_PAD);
         let modal = egui::Modal::new("file_migration".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.label(RichText::new(t("Your calendars were saved as files in Calendars.")).font(font_bold(text::T16)));
-            ui.add_space(space::S8);
-            if !saved.is_empty() {
-                ui.label(RichText::new(saved.join(", ")).font(font(text::T14)).color(p.text_2));
-            }
-            if !failed.is_empty() {
+            set_dialog_width(ui, content_w);
+            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                set_dialog_width(ui, content_w);
+                ui.add(egui::Label::new(RichText::new(t("Your calendars were saved as files in Calendars.")).font(font_bold(text::T16))).wrap());
                 ui.add_space(space::S8);
-                ui.label(RichText::new(format!("{} {}", t("Could not save the calendar as a file."), failed.join(", "))).font(font(text::T14)).color(p.danger));
-            }
-            ui.add_space(space::S16);
-            if theme::primary_button(ui, p, t("OK")).clicked() {
-                self.migration = None;
-            }
+                if !saved.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(saved.join(", ")).font(font(text::T14)).color(p.text_2)).wrap());
+                }
+                if !failed.is_empty() {
+                    ui.add_space(space::S8);
+                    ui.add(egui::Label::new(RichText::new(format!("{} {}", t("Could not save the calendar as a file."), failed.join(", "))).font(font(text::T14)).color(p.danger)).wrap());
+                }
+                ui.add_space(space::S16);
+                if theme::primary_button(ui, p, t("OK")).clicked() {
+                    self.migration = None;
+                }
+            });
         });
         if modal.should_close() {
             self.migration = None;
@@ -763,4 +841,21 @@ fn describe_when(ev: &CalendarEvent) -> String {
         out.push_str(&format!(" · {}", t("repeats")));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dialog_content_width, dialog_max_body_height, dialog_outer_width, DIALOG_MARGIN, DIALOG_PAD};
+
+    #[test]
+    fn dialogs_fit_inside_phone_and_desktop_widths() {
+        assert_eq!(dialog_outer_width(390.0, 440.0), 390.0 - 2.0 * DIALOG_MARGIN);
+        assert_eq!(dialog_outer_width(430.0, 620.0), 430.0 - 2.0 * DIALOG_MARGIN);
+        assert_eq!(dialog_outer_width(1440.0, 440.0), 440.0);
+        assert_eq!(dialog_outer_width(1440.0, 620.0), 620.0);
+        assert!(dialog_outer_width(390.0, 420.0) <= 390.0);
+        assert!(dialog_content_width(390.0, 440.0, DIALOG_PAD) + 2.0 * DIALOG_PAD + 2.0 * DIALOG_MARGIN <= 390.0);
+        assert!(dialog_content_width(390.0, 620.0, DIALOG_PAD) + 2.0 * DIALOG_PAD + 2.0 * DIALOG_MARGIN <= 390.0);
+        assert!(dialog_max_body_height(844.0, 88.0 + 2.0 * DIALOG_PAD) + 88.0 + 2.0 * DIALOG_PAD + 2.0 * DIALOG_MARGIN <= 844.0);
+    }
 }
