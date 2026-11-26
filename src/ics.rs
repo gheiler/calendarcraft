@@ -9,7 +9,7 @@
 //! Written events keep that distinction: UTC stays `…Z`, floating stays a bare date-time,
 //! a named zone is written with `TZID` and a `VTIMEZONE`, and all-day values use `VALUE=DATE`.
 
-use chrono::{Duration, NaiveDateTime, NaiveTime, Utc};
+use chrono::{Datelike, Duration, NaiveDateTime, NaiveTime, Utc};
 use craft_ical::{
     fold, format_rrule, param_value, parse_rrule,
     values::{self, escape_text, format_date, format_local, format_utc, unescape_text, When},
@@ -18,7 +18,7 @@ use craft_ical::{
 
 use crate::model::CalendarEvent;
 use crate::recur;
-use crate::tz::{EventZone, IanaRules, ZoneLookup};
+use crate::tz::{self, DisplayTz, EventZone, IanaRules, ZoneLookup};
 
 /// What an `.ics` file holds.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -52,6 +52,8 @@ pub fn parse(text: &str, calendar_id: &str) -> Result<IcsCalendar, String> {
     let mut stack: Vec<String> = Vec::new();
     let mut current: Option<Vec<ContentLine>> = None;
     let mut alarm_trigger: Option<String> = None;
+    // (UID, RECURRENCE-ID) of each changed occurrence, to take it out of its series below.
+    let mut overrides: Vec<(String, ContentLine)> = Vec::new();
     for raw in Lines::new(text) {
         let Some(line) = ContentLine::parse(&raw) else {
             continue;
@@ -78,6 +80,9 @@ pub fn parse(text: &str, calendar_id: &str) -> Result<IcsCalendar, String> {
                             cal.events.len(),
                             &lookup,
                         ) {
+                            if let Some(rid) = props.iter().find(|l| l.name == "RECURRENCE-ID") {
+                                overrides.push((ev.uid.clone(), rid.clone()));
+                            }
                             cal.events.push(ev);
                         }
                     }
@@ -107,6 +112,21 @@ pub fn parse(text: &str, calendar_id: &str) -> Result<IcsCalendar, String> {
             _ => {}
         }
     }
+    // A changed occurrence (RECURRENCE-ID) replaces the one its series would make there, so the
+    // series must not show that one too. Kept apart from EXDATE: it is not written back.
+    for (uid, rid) in overrides {
+        let Some(when) = when_of(&rid) else { continue };
+        if let Some(master) = cal
+            .events
+            .iter_mut()
+            .find(|e| e.uid == uid && e.rrule.is_some())
+        {
+            let wall = wall_in(&rid, when, &master.zone, &lookup);
+            if !master.overridden.contains(&wall) {
+                master.overridden.push(wall);
+            }
+        }
+    }
     let _ = zones.stopped_after();
     Ok(cal)
 }
@@ -115,29 +135,103 @@ fn when_of(line: &ContentLine) -> Option<When> {
     When::parse(line.value.trim())
 }
 
-fn zone_of(line: &ContentLine, when: When) -> EventZone {
-    if matches!(when, When::Utc(_)) {
-        return EventZone::Utc;
+/// What a `TZID` in the text means.
+enum ZoneSrc {
+    /// An IANA zone (the name itself, a known alias, the `VTIMEZONE`'s `X-LIC-LOCATION`, or the
+    /// device's zone when the `VTIMEZONE` keeps the same clock).
+    Iana(chrono_tz::Tz),
+    /// Only the `VTIMEZONE` in the text knows it: times are converted to UTC with it.
+    Ics(String),
+    /// Nothing knows it: the time is taken as written (floating).
+    Unknown,
+}
+
+fn resolve_zone(tzid: &str, year: i32, lookup: &ZoneLookup<'_>) -> ZoneSrc {
+    if let Some(tz) = tz::resolve_tzid(tzid) {
+        return ZoneSrc::Iana(tz);
     }
-    if matches!(when, When::Date(_)) {
-        return EventZone::Floating;
+    let Some(def) = lookup.get_ics(tzid) else {
+        return ZoneSrc::Unknown;
+    };
+    if let Some(tz) = tz::resolve_tzid(def.place()) {
+        return ZoneSrc::Iana(tz);
     }
-    match line.param("TZID") {
-        Some(tzid) if !tzid.is_empty() => EventZone::Tz(tzid.to_string()),
-        _ => EventZone::Floating,
+    // A name only the text defines (`Mitteleuropäische Zeit`, a custom Exchange name): when it
+    // keeps the device's clock all year, it is the device's zone, so repeats follow its DST.
+    if let Some(system) = tz::system_zone() {
+        let same = (1..=12).all(|month| {
+            [1, 15].iter().all(|day| {
+                let Some(at) = chrono::NaiveDate::from_ymd_opt(year, month, *day)
+                    .and_then(|d| d.and_hms_opt(12, 0, 0))
+                else {
+                    return true;
+                };
+                let instant = at.and_utc().timestamp();
+                lookup.offset_at(tzid, instant) == Some(DisplayTz::Iana(system).offset_at(instant))
+            })
+        });
+        if same {
+            return ZoneSrc::Iana(system);
+        }
+    }
+    ZoneSrc::Ics(tzid.to_string())
+}
+
+/// The zone a start written like this is kept in.
+fn zone_of(line: &ContentLine, when: When, lookup: &ZoneLookup<'_>) -> EventZone {
+    match when {
+        When::Utc(_) => EventZone::Utc,
+        When::Date(_) => EventZone::Floating,
+        When::Local(t) => match line.param("TZID").filter(|z| !z.trim().is_empty()) {
+            None => EventZone::Floating,
+            Some(tzid) => match resolve_zone(tzid, t.year(), lookup) {
+                ZoneSrc::Iana(tz) => EventZone::Tz(tz.name().to_string()),
+                ZoneSrc::Ics(_) => EventZone::Utc,
+                ZoneSrc::Unknown => EventZone::Floating,
+            },
+        },
     }
 }
 
-fn wall_of(when: When, zone: &EventZone, lookup: &ZoneLookup<'_>) -> NaiveDateTime {
-    match (when, zone) {
-        (When::Utc(t), _) => t,
-        (When::Date(d), _) => d.and_time(NaiveTime::MIN),
-        (When::Local(t), EventZone::Tz(tzid)) => {
-            // Keep the written wall clock; the lookup is used to confirm the zone exists.
-            let _ = lookup.instant_of(tzid, t);
-            t
+/// The instant a value names, when it names one (`None` for dates and floating times).
+fn instant_of(when: When, tzid: Option<&str>, lookup: &ZoneLookup<'_>) -> Option<i64> {
+    match when {
+        When::Utc(t) => Some(t.and_utc().timestamp()),
+        When::Date(_) => None,
+        When::Local(t) => {
+            let tzid = tzid.filter(|z| !z.trim().is_empty())?;
+            match resolve_zone(tzid, t.year(), lookup) {
+                ZoneSrc::Iana(tz) => Some(DisplayTz::Iana(tz).instant_of(t)),
+                ZoneSrc::Ics(name) => lookup.instant_of(&name, t),
+                ZoneSrc::Unknown => None,
+            }
         }
-        (When::Local(t), _) => t,
+    }
+}
+
+/// A value of `line` as a wall clock in `target` (the zone the event is kept in). A value
+/// already in that zone is kept exactly as written; a value in another zone is converted
+/// through its instant; a floating value or a date is taken as written.
+fn wall_in(line: &ContentLine, when: When, target: &EventZone, lookup: &ZoneLookup<'_>) -> NaiveDateTime {
+    let own = zone_of(line, when, lookup);
+    match (when, &own) {
+        // Written in the kept zone: exactly as written (a zone only the VTIMEZONE knows is
+        // kept as UTC, so its local times still go through the conversion below).
+        (When::Utc(t), EventZone::Utc) | (When::Local(t), EventZone::Tz(_) | EventZone::Floating)
+            if &own == target =>
+        {
+            return t;
+        }
+        _ => {}
+    }
+    if let When::Date(d) = when {
+        return d.and_time(NaiveTime::MIN);
+    }
+    match (instant_of(when, line.param("TZID"), lookup), target) {
+        (Some(instant), EventZone::Utc | EventZone::Tz(_)) => tz::wall_in_event_zone(target, instant),
+        // A zoned value in a floating event: its wall clock in the device's zone.
+        (Some(instant), EventZone::Floating) => DisplayTz::Local.wall_at(instant),
+        (None, _) => when.wall(),
     }
 }
 
@@ -155,8 +249,8 @@ fn build_event(
     let get = |name: &str| props.iter().find(|l| l.name == name);
     let start_line = get("DTSTART")?;
     let start_when = when_of(start_line)?;
-    let zone = zone_of(start_line, start_when);
-    let start = wall_of(start_when, &zone, lookup);
+    let zone = zone_of(start_line, start_when, lookup);
+    let start = wall_in(start_line, start_when, &zone, lookup);
     let end_line = get("DTEND");
     let end_when = end_line.and_then(when_of);
     let duration = get("DURATION").and_then(|l| parse_duration(&l.value));
@@ -172,17 +266,7 @@ fn build_event(
     for line in props.iter().filter(|l| l.name == "EXDATE") {
         for item in values::split_list(&line.value, 64) {
             if let Some(when) = When::parse(item.trim()) {
-                let z = match line.param("TZID") {
-                    Some(tzid) if !tzid.is_empty() => EventZone::Tz(tzid.to_string()),
-                    _ => {
-                        if matches!(when, When::Utc(_)) {
-                            EventZone::Utc
-                        } else {
-                            zone.clone()
-                        }
-                    }
-                };
-                exdates.push(wall_of(when, &z, lookup));
+                exdates.push(wall_in(line, when, &zone, lookup));
             }
         }
     }
@@ -229,6 +313,7 @@ fn build_event(
         ev.id = format!("{}_{}", ev.id, short_hash(&rid.value));
         ev.rrule = None;
         ev.exdates.clear();
+        ev.overridden.clear();
     }
     match start_when {
         When::Date(day) => {
@@ -250,9 +335,9 @@ fn build_event(
         When::Local(_) | When::Utc(_) => {
             ev.date = start.date();
             ev.start_time = Some(start.time());
-            let finish = if let Some(when) = end_when {
-                let end_zone = end_line.map(|l| zone_of(l, when)).unwrap_or(zone);
-                Some(wall_of(when, &end_zone, lookup))
+            let finish = if let (Some(when), Some(line)) = (end_when, end_line) {
+                // DTEND may name another zone (a flight); keep it in the start's zone.
+                Some(wall_in(line, when, &ev.zone, lookup))
             } else {
                 duration.map(|m| end_wall_from_duration(start, m))
             };
@@ -423,7 +508,6 @@ fn write_zones_for(out: &mut String, events: &[&CalendarEvent]) {
     }
 }
 
-use chrono::Datelike;
 
 /// A whole `.ics` file with these events.
 pub fn write_calendar<'a>(
