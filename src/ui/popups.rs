@@ -163,6 +163,7 @@ impl CalendarCraftApp {
             start_time: Some(start),
             end_time: Some(start + Duration::hours(1)),
             alert_minutes_before: Some(10),
+            zone: crate::tz::EventZone::from_settings(&self.store.settings.timezone),
             ..Default::default()
         };
         self.new_event = Some(NewEvent {
