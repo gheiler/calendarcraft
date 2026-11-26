@@ -548,7 +548,7 @@ impl CalendarStore {
     pub fn set_calendars<'a>(&'a self, set: &'a CalendarSet) -> impl Iterator<Item = &'a CalendarSource> {
         self.calendars
             .iter()
-            .filter(move |c| set.calendar_ids.iter().any(|id| *id == c.id))
+            .filter(move |c| set.calendar_ids.contains(&c.id))
     }
 
     /// Drop a calendar from every set (when the calendar is removed).

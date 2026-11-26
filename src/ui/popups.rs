@@ -564,7 +564,7 @@ impl CalendarCraftApp {
                 });
             });
             ui.horizontal(|ui| {
-                for (i, label) in [t("General"), t("Accounts"), "MCP"].iter().enumerate() {
+                for (i, label) in [t("General"), t("Accounts"), t("Sets"), "MCP"].iter().enumerate() {
                     let on = self.settings_tab == i as u8;
                     let b = egui::Button::new(RichText::new(*label).font(if on { font_bold(text::T14) } else { font(text::T14) }).color(if on { p.primary_strong } else { p.text_2 })).fill(if on { p.primary_faint } else { Color32::TRANSPARENT });
                     if ui.add(b).clicked() {
@@ -581,6 +581,7 @@ impl CalendarCraftApp {
                 match self.settings_tab {
                     0 => self.settings_general(ui, p),
                     1 => self.settings_accounts(ui, p),
+                    2 => self.settings_sets(ui, p),
                     _ => self.settings_mcp(ui, p),
                 }
             });

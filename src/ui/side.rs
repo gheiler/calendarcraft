@@ -264,6 +264,7 @@ impl CalendarCraftApp {
                 if show_inline {
                     let search = search_text_field(ui, &p, &mut self.search_query, inner);
                     apply_search_focus_and_dismiss(ui, &search, &mut self.search_open, &mut self.search_query);
+                    self.note_search_field(&search);
                 } else {
                     let icon = icon_button(ui, &p, Icon::Search, t("Search"));
                     if icon.clicked() {
@@ -278,6 +279,7 @@ impl CalendarCraftApp {
                             }).inner
                         });
                         apply_search_focus_and_dismiss(ui, &popup.inner, &mut self.search_open, &mut self.search_query);
+                        self.note_search_field(&popup.inner);
                         let clicked_outside = ui.ctx().input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|pt| !popup.response.rect.contains(pt) && !icon.rect.contains(pt)));
                         if clicked_outside && self.search_query.is_empty() {
                             self.search_open = false;
@@ -398,7 +400,7 @@ impl CalendarCraftApp {
         for c in 0..7 {
             let wd = chrono::Weekday::try_from(c as u8).unwrap_or(chrono::Weekday::Mon);
             let x = rect.left() + cell_w * (c as f32 + 0.5);
-            painter.text(Pos2::new(x, rect.top() + head_h * 0.5), Align2::CENTER_CENTER, i18n::weekday_letter(wd), font(text::T12), p.text_2);
+            painter.text(Pos2::new(x, rect.top() + head_h * 0.5), Align2::CENTER_CENTER, i18n::weekday_letter(wd), font(text::T12), if super::views::is_weekend(wd) { p.weekend_text } else { p.text_2 });
         }
         let now = today();
         for r in 0..rows {
@@ -471,20 +473,7 @@ impl CalendarCraftApp {
             return;
         }
         // Calendar sets as chips.
-        if self.store.calendar_sets.len() > 1 {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                for set in self.store.calendar_sets.clone() {
-                    let on = self.store.settings.active_calendar_set.as_deref() == Some(set.id.as_str());
-                    let text = RichText::new(&set.name).font(font(text::T12)).color(if on { p.on_primary_strong } else { p.text });
-                    let b = egui::Button::new(text).fill(if on { p.primary_strong } else { p.hover }).corner_radius(CornerRadius::same(255)).min_size(Vec2::new(0.0, 24.0));
-                    if ui.add(b).clicked() {
-                        self.store.settings.active_calendar_set = Some(set.id.clone());
-                        self.mark_changed();
-                    }
-                }
-            });
-        }
+        self.set_pills(ui, &p);
         let accounts = self.store.accounts.clone();
         let max_h = (ui.available_height() * 0.45).clamp(120.0, 240.0);
         egui::ScrollArea::vertical().id_salt("calendars").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -653,6 +642,7 @@ impl CalendarCraftApp {
                     if show_inline {
                         let search = search_text_field(ui, &p, &mut self.search_query, inner);
                         apply_search_focus_and_dismiss(ui, &search, &mut self.search_open, &mut self.search_query);
+                    self.note_search_field(&search);
                     } else {
                         let icon = icon_button(ui, &p, Icon::Search, t("Search"));
                         if icon.clicked() {
@@ -668,6 +658,7 @@ impl CalendarCraftApp {
                                 }).inner
                             });
                             apply_search_focus_and_dismiss(ui, &popup.inner, &mut self.search_open, &mut self.search_query);
+                        self.note_search_field(&popup.inner);
                             let clicked_outside = ui.ctx().input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|pt| !popup.response.rect.contains(pt) && !icon.rect.contains(pt)));
                             if clicked_outside && self.search_query.is_empty() {
                                 self.search_open = false;

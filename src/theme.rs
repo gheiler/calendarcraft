@@ -53,6 +53,14 @@ pub struct Palette {
     pub primary_faint: Color32,
     pub danger: Color32,
     pub shadow: Color32,
+    /// Saturday and Sunday in Month and Week: a faint cool tint, apart from out-of-month grey.
+    pub weekend: Color32,
+    /// Weekday names of Saturday and Sunday in the Month and Week headers.
+    pub weekend_text: Color32,
+    /// Days outside the shown month (Month view): clearly dimmer than the month's days.
+    pub outside: Color32,
+    /// Day numbers on those days; event bars there are veiled toward `outside`.
+    pub outside_text: Color32,
 }
 
 const fn hex(rgb: u32) -> Color32 {
@@ -103,6 +111,10 @@ pub fn palette(dark: bool) -> Palette {
             primary_faint: over(PURPLE, 31, page),
             danger: hex(0xFF6B6B),
             shadow: Color32::from_black_alpha(110),
+            weekend: over(hex(0x8EA2E0), 20, hex(0x262626)),
+            weekend_text: hex(0x9DAAD6),
+            outside: hex(0x191919),
+            outside_text: over(Color32::WHITE, 84, hex(0x191919)),
         }
     } else {
         let page = hex(0xF9F9FA);
@@ -124,6 +136,10 @@ pub fn palette(dark: bool) -> Palette {
             primary_faint: over(PURPLE, 31, white),
             danger: hex(0xD92626),
             shadow: Color32::from_black_alpha(26),
+            weekend: over(hex(0x5B74C4), 16, white),
+            weekend_text: hex(0x5A6A9C),
+            outside: over(Color32::BLACK, 18, white),
+            outside_text: over(Color32::BLACK, 110, white),
         }
     }
 }

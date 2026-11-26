@@ -5,6 +5,8 @@
 mod files;
 mod icons;
 mod popups;
+mod search;
+mod sets;
 mod side;
 mod views;
 
@@ -72,7 +74,7 @@ pub struct Launch {
     /// Use the sample data, ignoring what is stored.
     pub demo: bool,
     pub language: Option<String>,
-    /// Open Settings on this tab (0 General, 1 Accounts).
+    /// Open Settings on this tab (0 General, 1 Accounts, 2 Sets, 3 MCP).
     pub settings: Option<u8>,
     /// Show or hide the sidebar, overriding the saved choice.
     pub sidebar: Option<bool>,
@@ -81,6 +83,10 @@ pub struct Launch {
     pub caldav_sample: bool,
     /// Open the edit form of this account in Settings › Accounts (for screenshots).
     pub edit_account: Option<String>,
+    /// Add two sample calendar sets to the demo data (for screenshots).
+    pub sample_sets: bool,
+    /// Start with this text in the search field (for screenshots).
+    pub search: Option<String>,
 }
 
 /// The `.ics` document the host opened (artcraftCloud's drive).
@@ -164,6 +170,10 @@ pub struct CalendarCraftApp {
     pub selected_date: NaiveDate,
     pub view_mode: ViewMode,
     pub search_query: String,
+    search_ui: search::SearchUi,
+    /// Settings › Sets: the set being made or changed, and the one asked about deleting.
+    pub set_form: Option<sets::SetForm>,
+    pub set_delete: Option<String>,
     pub quick_input: String,
     pub prefs: UiPrefs,
     pub palette: Palette,
@@ -321,6 +331,19 @@ impl CalendarCraftApp {
             }
         }
         Self::drop_ephemeral_file_accounts(&mut store);
+        store.normalize_calendar_sets();
+        if launch.demo && launch.sample_sets {
+            store.calendar_sets.push(crate::model::CalendarSet {
+                id: "set_work".into(),
+                name: "Work".into(),
+                calendar_ids: vec!["cal_work".into(), "cal_product".into(), "cal_studio".into()],
+            });
+            store.calendar_sets.push(crate::model::CalendarSet {
+                id: "set_family".into(),
+                name: "Family".into(),
+                calendar_ids: vec!["cal_personal".into(), "cal_family".into()],
+            });
+        }
         if launch.demo && launch.caldav_sample {
             if let Some(acc) = store.accounts.iter_mut().find(|a| a.id == "acc_personal") {
                 acc.kind = AccountKind::Caldav;
@@ -342,6 +365,9 @@ impl CalendarCraftApp {
             selected_date: anchor,
             view_mode,
             search_query: String::new(),
+            search_ui: search::SearchUi::default(),
+            set_form: None,
+            set_delete: None,
             quick_input: String::new(),
             palette: theme::palette(false),
             prefs,
@@ -518,7 +544,7 @@ impl CalendarCraftApp {
     pub fn events_on(&self, day: NaiveDate) -> Vec<CalendarEvent> {
         let display = crate::tz::DisplayTz::parse(&self.store.settings.timezone);
         self.store
-            .events_on_date(day, &self.search_query)
+            .events_on_date(day, "")
             .into_iter()
             .filter_map(|ev| ev.projected(day, display))
             .collect()
@@ -888,16 +914,7 @@ impl CalendarCraftApp {
             ctag: None,
             ..Default::default()
         });
-        self.add_to_all_set(&id);
         id
-    }
-
-    pub(super) fn add_to_all_set(&mut self, cal_id: &str) {
-        for set in &mut self.store.calendar_sets {
-            if set.id == "set_all" && !set.calendar_ids.iter().any(|c| c == cal_id) {
-                set.calendar_ids.push(cal_id.to_string());
-            }
-        }
     }
 
     pub fn next_color(&self) -> String {
@@ -1013,7 +1030,6 @@ impl CalendarCraftApp {
                                 ctag: rc.ctag.clone(),
                                 ..Default::default()
                             });
-                            self.add_to_all_set(&id);
                         }
                     }
                     fresh.push(id);
@@ -1027,6 +1043,9 @@ impl CalendarCraftApp {
                     .map(|c| c.id.clone())
                     .collect();
                 self.store.calendars.retain(|c| !stale.contains(&c.id));
+                for id in &stale {
+                    self.store.forget_calendar_in_sets(id);
+                }
                 self.store
                     .events
                     .retain(|e| !stale.contains(&e.calendar_id));
@@ -1526,6 +1545,10 @@ impl CalendarCraftApp {
             Arc::new(move || c.request_repaint()),
         );
         self.load_secrets();
+        if let Some(q) = self.launch.search.clone() {
+            self.search_query = q;
+            self.search_open = true;
+        }
         if let Some(id) = self.launch.open_event.clone() {
             self.selected_event = Some(id.clone());
             self.open_inspector(&id, None);
@@ -1820,6 +1843,7 @@ impl eframe::App for CalendarCraftApp {
         self.ensure_range();
         #[cfg(not(target_arch = "wasm32"))]
         self.refresh_icon(ctx);
+        self.search_keys(ctx);
         self.keyboard(ctx);
 
         if self.is_mobile(ctx) {
@@ -1827,6 +1851,7 @@ impl eframe::App for CalendarCraftApp {
         } else {
             self.desktop_layout(ctx);
         }
+        self.search_popup(ctx);
         self.popups(ctx);
         if host::hosted() {
             if self.file_sync_requested {
