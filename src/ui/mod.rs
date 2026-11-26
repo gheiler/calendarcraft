@@ -1466,6 +1466,8 @@ impl CalendarCraftApp {
     }
 
     fn first_frame(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        crate::icon::set_dock_icon();
         let c = ctx.clone();
         self.inbox = Some(Inbox::new(Arc::new(move || c.request_repaint())));
         let c = ctx.clone();

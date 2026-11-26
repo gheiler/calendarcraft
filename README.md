@@ -58,6 +58,16 @@ The browser build takes `?view=`, `?theme=`, `?date=`, `?lang=`, `?demo=1` (samp
 `?open=<event id>`, `?new=1`, `?settings=general|accounts` and `?sidebar=0|1`. `scripts/screenshots.cjs` takes the screenshots above from a
 served build (puppeteer-core and Chrome).
 
+The desktop app uses `assets/icon.png` (the same logo as the web favicon) as its window
+icon. On macOS, `cargo run` is not an `.app` bundle, so the Dock icon is also set at
+runtime. For a proper bundle (Dock, Finder and `Cmd-Tab`):
+
+```sh
+cargo install cargo-bundle
+cargo bundle --release
+open target/release/bundle/osx/CalendarCraft.app
+```
+
 A live CalDAV round trip: `CALDAV_TEST_URL=https://server/dav/cal/me/ CALDAV_TEST_USER=…
 CALDAV_TEST_PASS=… cargo test --test caldav_live`.
 

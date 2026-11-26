@@ -2,6 +2,8 @@
 
 pub mod caldav;
 pub mod host;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod icon;
 pub mod i18n;
 pub mod ics;
 pub mod mcp;

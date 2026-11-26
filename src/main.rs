@@ -144,6 +144,9 @@ mod native_cli {
             .with_title("CalendarCraft")
             .with_inner_size(size)
             .with_min_inner_size([360.0, 560.0]);
+        if let Ok(icon) = calendarcraft::icon::load() {
+            viewport = viewport.with_icon(icon);
+        }
 
         if is_screenshot {
             viewport = viewport.with_active(false);
@@ -162,6 +165,9 @@ mod native_cli {
                 builder.with_activate_ignoring_other_apps(false);
             }));
         }
+
+        #[cfg(target_os = "macos")]
+        calendarcraft::icon::set_dock_icon();
 
         let launch = Launch {
             config_path: resolved_cfg,
