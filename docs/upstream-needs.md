@@ -11,3 +11,4 @@
 | 7 | eframe (web) | Under Chrome's device-scale emulation the canvas is sized at 1× | real devices are fine; `scripts/screenshots.cjs` starts Chrome at a real 2× for phone shots |
 | 8 | Stalwart | App passwords can't be scoped to CalDAV only | the MailCraft app password also opens CalDAV |
 | 9 | Google / Microsoft | OAuth needed for CalDAV/Graph | read-only ICS feeds |
+| 10 | craft-ical `rrule` | A lossless RRULE model (every part kept, `BYMONTHDAY`/`BYMONTH`/`BYSETPOS` lists, several positioned `BYDAY`s, `WKST`) and an expander | `Recurrence` holds a subset and `format_*` writes only that subset, so a round trip dropped parts; CalendarCraft now has its own `src/rrule.rs` (model, parse/write, summary) and `src/recur.rs` (expansion) and no longer formats rules with craft-ical |

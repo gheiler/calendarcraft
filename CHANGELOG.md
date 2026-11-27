@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.5
+
+- **Custom repeats.** The event form's Repeat menu has *Custom…* after the presets, as in Apple
+  Calendar and Fantastical: *Every N* days, weeks, months or years; for weeks, toggle chips for
+  Mon–Sun (the week starts on Monday, at least one day, the event's own weekday by default); for
+  months and years, on the event's day or on *the first … fifth / last* weekday ("the 2nd
+  Tuesday", "the last Friday"); and an end: never, after N times, or on a date. A summary line
+  ("Every 2 weeks on Mon, Wed, Fri until 31 Dec 2026") shows under it in the new-event dialog and
+  replaces "repeats" in the event details. Works in the phone layout (chips shrink to letters
+  when needed) and in the web build; labels are translated.
+- Rules map to and from `RRULE` (`FREQ`, `INTERVAL`, `BYDAY` with positions, `BYMONTHDAY`,
+  `BYMONTH`, `BYSETPOS`, `COUNT`, `UNTIL`, `WKST`). A rule that equals a preset shows the preset
+  (`FREQ=WEEKLY;BYDAY=FR` on a Friday is *Every week*); anything else opens as Custom with its
+  values filled in. A rule with parts the form can't edit (`BYHOUR`, several month days,
+  "last working day", `X-` parts…) is shown with its summary, the rule itself and a note, and is
+  kept exactly as it is unless you pick another repeat.
+- Repeat rules are no longer rewritten when an event is saved: every part is kept (before, parts
+  `craft-ical` doesn't model, such as `BYMONTHDAY` lists, `BYSETPOS` sets or `WKST`, were
+  dropped on the next save to CalDAV or a file). Only `UNTIL` is put in the form RFC 5545 asks
+  for: a date for all-day events, UTC beside a start with a `TZID` (the end of that day in the
+  event's zone), a local time beside a floating start.
+- Repeating events are expanded period by period as RFC 5545 has it: several weekdays a week
+  with an interval and `WKST`, monthly and yearly positions (`2TU`, `-1FR`, `5MO`), month days
+  from the end (`BYMONTHDAY=-1`), `BYMONTH`, `BYSETPOS` ("last working day"), the 31st and
+  29 February skipped where they don't exist, and the start always counted as the first
+  occurrence. Times stay on the wall clock across daylight-saving changes; `EXDATE` and `COUNT`
+  work as before. Long-running series are worked out from near the shown dates instead of from
+  their start.
+- A click in one of the details popover's menus that reaches below the popover no longer closes
+  it.
+
 ## 0.3.4
 
 - iCloud (and other CalDAV) events no longer show at the wrong time. Every store since 0.3.0 was
