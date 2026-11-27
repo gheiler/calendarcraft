@@ -131,10 +131,10 @@ fn label(ui: &mut egui::Ui, p: &Palette, s: &str) {
     ui.label(RichText::new(s).font(font(text::T12)).color(p.text_2));
 }
 
-/// A weekday toggle in the calendar-set pill style.
+/// A weekday toggle: one letter on a square chip, filled when on.
 fn chip(ui: &mut egui::Ui, p: &Palette, s: &str, on: bool, width: f32) -> egui::Response {
     let text = RichText::new(s).font(font(text::T12)).color(if on { p.on_primary_strong } else { p.text });
-    ui.add_sized([width, 28.0], egui::Button::new(text).fill(if on { p.primary_strong } else { p.hover }).corner_radius(CornerRadius::same(255)))
+    ui.add_sized([width, 28.0], egui::Button::new(text).fill(if on { p.primary_strong } else { p.hover }).corner_radius(CornerRadius::ZERO))
 }
 
 /// Width for a short drop-down that still leaves room beside it in a `col_w` column.
@@ -240,18 +240,15 @@ pub fn repeat_rows(ui: &mut egui::Ui, p: &Palette, ev: &mut CalendarEvent, form:
             label(ui, p, t("Days"));
             ui.vertical(|ui| {
                     ui.set_max_width(col_w);
-                    // Seven chips on one row, narrower on a phone.
+                    // Seven one-letter chips on one row (M T W T F S S), narrower on a phone.
                     let gap = 4.0;
-                    let chip_w = ((col_w - 6.0 * gap - 4.0) / 7.0).clamp(24.0, 48.0);
-                    // Short names when they fit, else one letter (a phone in some languages).
-                    let widest = WEEKDAYS.iter().map(|d| ui.fonts(|f| f.layout_no_wrap(i18n::weekday_short(*d).to_string(), font(text::T12), p.text).size().x)).fold(0.0_f32, f32::max);
-                    let letters = widest + 8.0 > chip_w;
+                    let chip_w = ((col_w - 6.0 * gap - 4.0) / 7.0).clamp(24.0, 36.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
                         ui.spacing_mut().button_padding = Vec2::new(2.0, 4.0);
                         for day in WEEKDAYS {
                             let on = c.days.contains(&day);
-                            let name = if letters { i18n::weekday_letter(day) } else { i18n::weekday_short(day).to_string() };
+                            let name = i18n::weekday_letter(day);
                             let r = chip(ui, p, &name, on, chip_w).on_hover_text(i18n::weekday_name(day));
                             if r.clicked() {
                                 if on && c.days.len() == 1 {

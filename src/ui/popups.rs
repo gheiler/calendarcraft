@@ -21,6 +21,9 @@ const CLOSE_INSET: f32 = 8.0;
 
 const ALERTS: &[(Option<u32>, &str)] = &[(None, "None"), (Some(0), "At time of event"), (Some(5), "5 minutes before"), (Some(10), "10 minutes before"), (Some(15), "15 minutes before"), (Some(30), "30 minutes before"), (Some(60), "1 hour before"), (Some(1440), "1 day before")];
 
+/// Height of the pinned row of actions under a scrolling dialog body (gap plus buttons).
+const INSPECTOR_FOOTER: f32 = 12.0 + 36.0;
+
 /// Margin left on each side of a modal so it never touches the screen edge.
 const DIALOG_MARGIN: f32 = 12.0;
 /// Padding of the larger dialogs (Settings, new event, file conflict, migration).
@@ -298,49 +301,53 @@ impl CalendarCraftApp {
                     let title_w = (close_rect.left() - ui.cursor().left() - 8.0).max(40.0);
                     ui.add_enabled(editable, egui::TextEdit::singleline(&mut ins.draft.title).font(font_bold(text::T18)).frame(false).desired_width(title_w).hint_text(t("Title")));
                 });
-                // Keep the title and close button visible; scroll the fields when the sheet is tall.
-                let body_h = (max_h - 72.0).max(80.0);
+                // The title and close button stay on top and the actions at the bottom; the
+                // fields between them scroll, with a visible bar, when the sheet is too short.
+                let body_h = (max_h - 40.0 - 36.0 - INSPECTOR_FOOTER).max(80.0);
                 let content_h = self.popup_sizes.get("inspector_body").map(|s| s.y).unwrap_or(body_h);
-                let scroll = egui::ScrollArea::vertical().max_height(body_h).min_scrolled_height(content_h.min(body_h)).show(ui, |ui| {
-                    set_dialog_width(ui, inner);
-                    ui.label(RichText::new(describe_when(&ins.draft)).font(font(text::T14)).color(p.text_2));
-                    if !editable {
-                        let why = if ins.draft.locked { t("Part of a repeating series with changes; edit it in the app that made it.") } else { t("This calendar is read only.") };
-                        ui.horizontal_wrapped(|ui| {
-                            super::icons::inline(ui, Icon::Lock, 12.0, p.text_2);
-                            ui.add(egui::Label::new(RichText::new(why).font(font(text::T12)).color(p.text_2)).wrap());
+                let scroll = ui.scope(|ui| {
+                    theme::visible_scroll_bars(ui);
+                    theme::dialog_scroll(body_h).id_salt("inspector-body").min_scrolled_height(content_h.min(body_h)).show(ui, |ui| {
+                        set_dialog_width(ui, inner - theme::SCROLL_GUTTER);
+                        ui.label(RichText::new(describe_when(&ins.draft)).font(font(text::T14)).color(p.text_2));
+                        if !editable {
+                            let why = if ins.draft.locked { t("Part of a repeating series with changes; edit it in the app that made it.") } else { t("This calendar is read only.") };
+                            ui.horizontal_wrapped(|ui| {
+                                super::icons::inline(ui, Icon::Lock, 12.0, p.text_2);
+                                ui.add(egui::Label::new(RichText::new(why).font(font(text::T12)).color(p.text_2)).wrap());
                         });
                     }
                     ui.add_space(space::S8);
                     let Inspector { draft, date_text, start_text, end_text, repeat, .. } = &mut ins;
                     event_fields(ui, p, draft, Texts { date: date_text, start: start_text, end: end_text, repeat, repeat_summary: false }, &calendars, editable);
-                    ui.add_space(space::S12);
-                    ui.horizontal_wrapped(|ui| {
-                        if editable {
-                            if ins.confirm_delete {
-                                if ui.add(egui::Button::new(RichText::new(t("Delete event")).color(Color32::WHITE)).fill(p.danger)).clicked() {
-                                    delete = true;
-                                }
-                                if ui.button(t("Keep")).clicked() {
-                                    ins.confirm_delete = false;
-                                }
-                            } else if ui.add(egui::Button::new(RichText::new(t("Delete")).color(p.danger)).fill(Color32::TRANSPARENT)).clicked() {
-                                ins.confirm_delete = true;
+                    })
+                }).inner;
+                ui.add_space(space::S12);
+                ui.horizontal(|ui| {
+                    if editable {
+                        if ins.confirm_delete {
+                            if ui.add(egui::Button::new(RichText::new(t("Delete event")).color(Color32::WHITE)).fill(p.danger)).clicked() {
+                                delete = true;
                             }
+                            if ui.button(t("Keep")).clicked() {
+                                ins.confirm_delete = false;
+                            }
+                        } else if ui.add(egui::Button::new(RichText::new(t("Delete")).color(p.danger)).fill(Color32::TRANSPARENT)).clicked() {
+                            ins.confirm_delete = true;
                         }
-                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                            if editable {
-                                if theme::primary_button(ui, p, t("Save")).clicked() {
-                                    save = true;
-                                }
-                                if ui.button(t("Cancel")).clicked() {
-                                    close = true;
-                                }
-                            } else if ui.button(t("Close")).clicked() {
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        if editable {
+                            if theme::primary_button(ui, p, t("Save")).clicked() {
+                                save = true;
+                            }
+                            if ui.button(t("Cancel")).clicked() {
                                 close = true;
                             }
+                        } else if ui.button(t("Close")).clicked() {
+                            close = true;
+                        }
                         });
-                    });
                 });
                 body_size = Some(scroll.content_size);
             });
@@ -458,49 +465,54 @@ impl CalendarCraftApp {
         let mut cancel = false;
         let screen = ctx.screen_rect();
         let content_w = dialog_content_width(screen.width(), 500.0, DIALOG_PAD);
-        let max_h = dialog_max_body_height(screen.height(), 2.0 * DIALOG_PAD + 36.0);
+        let max_h = dialog_max_body_height(screen.height(), 2.0 * DIALOG_PAD + 36.0 + INSPECTOR_FOOTER);
         let modal = egui::Modal::new("new_event".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
             set_dialog_width(ui, content_w);
             ui.label(RichText::new(t("New event")).font(font_bold(text::T18)));
             let content_h = self.popup_sizes.get("new_event_body").map(|s| s.y).unwrap_or(max_h);
-            let scroll = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(content_h.min(max_h)).show(ui, |ui| {
-            set_dialog_width(ui, content_w);
-            ui.add_space(space::S4);
-            let r = theme::text_field(ui, p, egui::TextEdit::singleline(&mut ne.sentence).hint_text(t("Type it: Dinner with Ada friday 7pm at Osteria")).desired_width(f32::INFINITY));
-            if !ne.focus_done {
-                r.request_focus();
-                ne.focus_done = true;
-            }
-            if r.changed() {
-                // "tomorrow", "friday"… count from today; without one the event stays on its day.
-                if let Some(parsed) = parse_quick_entry(&ne.sentence, today(), &self.store.calendars, &ne.draft.calendar_id) {
-                    ne.draft.title = parsed.title.clone();
-                    ne.draft.all_day = parsed.all_day;
-                    ne.draft.location = parsed.location.clone();
-                    if let Some(c) = parsed.calendar_id.clone().filter(|c| calendars.iter().any(|x| &x.id == c)) {
-                        ne.draft.calendar_id = c;
+            let scroll = ui.scope(|ui| {
+                theme::visible_scroll_bars(ui);
+                theme::dialog_scroll(max_h).id_salt("new-event-body").min_scrolled_height(content_h.min(max_h)).show(ui, |ui| {
+                    set_dialog_width(ui, content_w - theme::SCROLL_GUTTER);
+                    ui.add_space(space::S4);
+                    let r = theme::text_field(ui, p, egui::TextEdit::singleline(&mut ne.sentence).hint_text(t("Type it: Dinner with Ada friday 7pm at Osteria")).desired_width(f32::INFINITY));
+                    if !ne.focus_done {
+                        r.request_focus();
+                        ne.focus_done = true;
                     }
-                    ne.date_text = if parsed.date_given { parsed.date } else { ne.day }.to_string();
-                    if let Some(s) = parsed.start_time {
-                        ne.start_text = s.format("%H:%M").to_string();
-                        ne.end_text = parsed.end_time.unwrap_or(s + Duration::hours(1)).format("%H:%M").to_string();
+                    if r.changed() {
+                        // "tomorrow", "friday"… count from today; without one the event stays on its day.
+                        if let Some(parsed) = parse_quick_entry(&ne.sentence, today(), &self.store.calendars, &ne.draft.calendar_id) {
+                            ne.draft.title = parsed.title.clone();
+                            ne.draft.all_day = parsed.all_day;
+                            ne.draft.location = parsed.location.clone();
+                            if let Some(c) = parsed.calendar_id.clone().filter(|c| calendars.iter().any(|x| &x.id == c)) {
+                                ne.draft.calendar_id = c;
+                            }
+                            ne.date_text = if parsed.date_given { parsed.date } else { ne.day }.to_string();
+                            if let Some(s) = parsed.start_time {
+                                ne.start_text = s.format("%H:%M").to_string();
+                                ne.end_text = parsed.end_time.unwrap_or(s + Duration::hours(1)).format("%H:%M").to_string();
+                            }
+                            if parsed.alert_minutes_before.is_some() {
+                                ne.draft.alert_minutes_before = parsed.alert_minutes_before;
+                            }
+                        }
                     }
-                    if parsed.alert_minutes_before.is_some() {
-                        ne.draft.alert_minutes_before = parsed.alert_minutes_before;
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !ne.draft.title.trim().is_empty() {
+                        add = true;
                     }
-                }
-            }
-            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !ne.draft.title.trim().is_empty() {
-                add = true;
-            }
-            ui.add_space(space::S8);
-            theme::text_field(ui, p, egui::TextEdit::singleline(&mut ne.draft.title).font(font_bold(text::T16)).hint_text(t("Title")).desired_width(f32::INFINITY));
-            ui.add_space(space::S4);
-            if calendars.is_empty() {
-                ui.label(RichText::new(t("There is no calendar to add to. Add an account or a calendar in Settings.")).color(p.danger));
-            }
-            let NewEvent { draft, date_text, start_text, end_text, repeat, .. } = &mut ne;
-            event_fields(ui, p, draft, Texts { date: date_text, start: start_text, end: end_text, repeat, repeat_summary: true }, &calendars, true);
+                    ui.add_space(space::S8);
+                    theme::text_field(ui, p, egui::TextEdit::singleline(&mut ne.draft.title).font(font_bold(text::T16)).hint_text(t("Title")).desired_width(f32::INFINITY));
+                    ui.add_space(space::S4);
+                    if calendars.is_empty() {
+                        ui.label(RichText::new(t("There is no calendar to add to. Add an account or a calendar in Settings.")).color(p.danger));
+                    }
+                    let NewEvent { draft, date_text, start_text, end_text, repeat, .. } = &mut ne;
+                    event_fields(ui, p, draft, Texts { date: date_text, start: start_text, end: end_text, repeat, repeat_summary: true }, &calendars, true);
+                })
+            }).inner;
+            // The actions stay under the scrolling body.
             ui.add_space(space::S12);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if theme::primary_button(ui, p, t("Add")).clicked() {
@@ -509,7 +521,6 @@ impl CalendarCraftApp {
                 if ui.button(t("Cancel")).clicked() {
                     cancel = true;
                 }
-            });
             });
             scroll.content_size
         });
@@ -575,8 +586,9 @@ impl CalendarCraftApp {
             // Cap the body so the modal, with its title and tabs, stays on the screen, and ask
             // for that height up front so the list is not squeezed (it still shrinks to fit
             // shorter tabs).
-            egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, |ui| {
-                set_dialog_width(ui, content_w);
+            theme::visible_scroll_bars(ui);
+            theme::dialog_scroll(max_h).min_scrolled_height(max_h).show(ui, |ui| {
+                set_dialog_width(ui, content_w - theme::SCROLL_GUTTER);
                 match self.settings_tab {
                     0 => self.settings_general(ui, p),
                     1 => self.settings_accounts(ui, p),
@@ -893,8 +905,9 @@ impl CalendarCraftApp {
         let max_h = dialog_max_body_height(ctx.screen_rect().height(), 2.0 * DIALOG_PAD);
         let modal = egui::Modal::new("file_conflict".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
             set_dialog_width(ui, content_w);
-            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
-                set_dialog_width(ui, content_w);
+            theme::visible_scroll_bars(ui);
+            theme::dialog_scroll(max_h).show(ui, |ui| {
+                set_dialog_width(ui, content_w - theme::SCROLL_GUTTER);
                 ui.add(egui::Label::new(RichText::new(t("Someone else changed this calendar. Choose how to continue.")).font(font_bold(text::T16))).wrap());
                 ui.add_space(space::S8);
                 ui.add(egui::Label::new(RichText::new(format!("{name}\n{}", t("This file changed on another device or tab."))).font(font(text::T14)).color(p.text_2)).wrap());
@@ -926,8 +939,9 @@ impl CalendarCraftApp {
         let max_h = dialog_max_body_height(ctx.screen_rect().height(), 2.0 * DIALOG_PAD);
         let modal = egui::Modal::new("file_migration".into()).frame(egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(24)).shadow(ctx.style().visuals.window_shadow)).show(ctx, |ui| {
             set_dialog_width(ui, content_w);
-            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
-                set_dialog_width(ui, content_w);
+            theme::visible_scroll_bars(ui);
+            theme::dialog_scroll(max_h).show(ui, |ui| {
+                set_dialog_width(ui, content_w - theme::SCROLL_GUTTER);
                 ui.add(egui::Label::new(RichText::new(t("Your calendars were saved as files in Calendars.")).font(font_bold(text::T16))).wrap());
                 ui.add_space(space::S8);
                 if !saved.is_empty() {

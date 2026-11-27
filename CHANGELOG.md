@@ -4,12 +4,17 @@
 
 - **Custom repeats.** The event form's Repeat menu has *Custom…* after the presets, as in Apple
   Calendar and Fantastical: *Every N* days, weeks, months or years; for weeks, toggle chips for
-  Mon–Sun (the week starts on Monday, at least one day, the event's own weekday by default); for
+  Mon–Sun shown as square one-letter chips, M T W T F S S, in every language and width (the week starts on Monday, at least one day, the event's own weekday by default); for
   months and years, on the event's day or on *the first … fifth / last* weekday ("the 2nd
   Tuesday", "the last Friday"); and an end: never, after N times, or on a date. A summary line
   ("Every 2 weeks on Mon, Wed, Fri until 31 Dec 2026") shows under it in the new-event dialog and
-  replaces "repeats" in the event details. Works in the phone layout (chips shrink to letters
-  when needed) and in the web build; labels are translated.
+  replaces "repeats" in the event details. Works in the phone layout and in the web build;
+  labels are translated.
+- Event details, the new-event dialog and the settings, file-conflict and migration dialogs scroll
+  when they are taller than the window, with a scroll bar that stays visible (in its own gutter,
+  not hidden until hover) whenever there is more to see. In event details and the new-event
+  dialog the actions (Delete, Cancel, Save / Add) are pinned under the scrolling fields, so a
+  long repeat or long notes no longer push them out of the popover.
 - Rules map to and from `RRULE` (`FREQ`, `INTERVAL`, `BYDAY` with positions, `BYMONTHDAY`,
   `BYMONTH`, `BYSETPOS`, `COUNT`, `UNTIL`, `WKST`). A rule that equals a preset shows the preset
   (`FREQ=WEEKLY;BYDAY=FR` on a Friday is *Every week*); anything else opens as Custom with its
