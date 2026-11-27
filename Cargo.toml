@@ -1,6 +1,6 @@
 [package]
 name = "calendarcraft"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 default-run = "calendarcraft"
 description = "Clean-room calendar app in Rust for macOS, WebAssembly, and MCP"

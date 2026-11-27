@@ -42,6 +42,11 @@ understands sentences ("Dinner with Ada friday 7pm at Osteria"), and runs inside
 - **Events:** click an event for a popover inspector (calendar, all-day, date and times, location,
   link, alert, repeat, notes, delete); double-click an empty slot or day, press **N** (or **C**, or
   ⌘N in the desktop app) for the new-event dialog. Sentences fill in the dialog as you type.
+- **Repeats:** Never, every day / week / month / year, or *Custom…*: every N days, weeks, months
+  or years; weekday chips (Mon–Sun); the event's day of the month or "the 2nd Tuesday" / "the
+  last Friday"; ending never, after N times or on a date. A summary ("Every 2 weeks on Mon, Wed,
+  Fri until 31 Dec 2026") shows in the details. Rules from other apps that the form can't edit
+  are shown read-only and kept as they are.
 - **Phone layout** below 720 px: Day and Month, a week strip, swipe sideways to change month.
 - **Look:** SnowUI light and dark (purple `#B899EB`, `#6E48B8` for text and filled buttons),
   system typography (SF Pro on macOS, Inter in the browser), roomy buttons (16 × 7 px padding,

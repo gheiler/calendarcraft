@@ -17,6 +17,8 @@ fn every_ui_character_has_a_glyph() {
         ("src/ui/side.rs", include_str!("../src/ui/side.rs")),
         ("src/ui/views.rs", include_str!("../src/ui/views.rs")),
         ("src/ui/popups.rs", include_str!("../src/ui/popups.rs")),
+        ("src/ui/repeat.rs", include_str!("../src/ui/repeat.rs")),
+        ("src/rrule.rs", include_str!("../src/rrule.rs")),
         ("src/ui/icons.rs", include_str!("../src/ui/icons.rs")),
         ("src/i18n.rs", include_str!("../src/i18n.rs")),
     ];

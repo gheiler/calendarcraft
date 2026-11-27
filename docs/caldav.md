@@ -10,9 +10,13 @@
 2. **Reading.** `REPORT calendar-query` with a `time-range` around the shown date (about six
    months back, thirteen ahead), widened as you move. Each `calendar-data` is parsed
    (`src/ics.rs`, using [craft-ical](https://github.com/storytold/craft-libs) for lines, values,
-   `RRULE` text and `VTIMEZONE`); repeating events are expanded locally (`src/recur.rs`:
-   DAILY/WEEKLY/MONTHLY/YEARLY, INTERVAL, COUNT, UNTIL, BYDAY, EXDATE) in the event's own
-   zone, then shown in the user's zone. Read-only calendars
+   `VTIMEZONE`); the `RRULE` is read by `src/rrule.rs`, which keeps every part, and repeating
+   events are expanded locally (`src/recur.rs`: DAILY/WEEKLY/MONTHLY/YEARLY, INTERVAL, COUNT,
+   UNTIL, BYDAY with positions, BYMONTHDAY, BYMONTH, BYSETPOS, WKST, EXDATE) in the event's own
+   zone, then shown in the user's zone. Parts that pick times within a day or weeks of the year
+   (`BYHOUR`, `BYWEEKNO`, `BYYEARDAY`…) are kept but not expanded, and rules more often than
+   daily show once. Writing puts the rule back as it was, with `UNTIL` in UTC beside a `TZID`
+   start, a date for all-day events and a local time for floating ones. Read-only calendars
    (`current-user-privilege-set` without write) and multi-event resources are locked.
 3. **Writing.** A new event is `PUT <calendar>/<uid>.ics` with `If-None-Match: *`; a change is a
    `PUT` with `If-Match: <etag>`; a delete is `DELETE` with `If-Match`. On `412` the calendar is

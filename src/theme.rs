@@ -338,6 +338,36 @@ pub fn text_field_padded(ui: &mut egui::Ui, p: &Palette, edit: egui::TextEdit<'_
     r
 }
 
+/// Room a dialog's scroll bar takes beside the content (bar plus its margin).
+pub const SCROLL_GUTTER: f32 = 12.0;
+
+/// Scroll bars for dialogs: they keep their own gutter (never covering the content) and stay
+/// visible, in the text colour at low opacity, whenever the content is taller than the dialog,
+/// not only on hover. They widen a little under the pointer.
+pub fn visible_scroll_bars(ui: &mut egui::Ui) {
+    ui.spacing_mut().scroll = egui::style::ScrollStyle {
+        floating: true,
+        bar_width: 8.0,
+        floating_width: 6.0,
+        floating_allocated_width: SCROLL_GUTTER,
+        bar_inner_margin: SCROLL_GUTTER - 8.0,
+        bar_outer_margin: 0.0,
+        handle_min_length: 24.0,
+        foreground_color: true,
+        dormant_background_opacity: 0.06,
+        active_background_opacity: 0.1,
+        interact_background_opacity: 0.14,
+        dormant_handle_opacity: 0.32,
+        active_handle_opacity: 0.45,
+        interact_handle_opacity: 0.6,
+    };
+}
+
+/// A dialog body that scrolls vertically when taller than `max_h`, its bar shown while it does.
+pub fn dialog_scroll(max_h: f32) -> egui::ScrollArea {
+    egui::ScrollArea::vertical().max_height(max_h).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+}
+
 /// A drop-down in the same style as `text_field`; the list itself keeps the menu style.
 pub fn select<R>(ui: &mut egui::Ui, p: &Palette, combo: egui::ComboBox, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<Option<R>> {
     let menu_style = ui.style().clone();

@@ -12,6 +12,7 @@ pub mod model;
 pub mod net;
 pub mod nlp;
 pub mod recur;
+pub mod rrule;
 pub mod search;
 pub mod secrets;
 pub mod sync;
@@ -57,6 +58,7 @@ pub fn wasm_start() -> Result<(), JsValue> {
         sample_sets: query("sets").is_some(),
         edit_set: query("sets").filter(|v| v == "edit").map(|_| "set_work".to_string()),
         search: query("search"),
+        repeat: query("repeat"),
         ..Default::default()
     };
     wasm_bindgen_futures::spawn_local(async move {
