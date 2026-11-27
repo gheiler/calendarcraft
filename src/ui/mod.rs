@@ -5,6 +5,7 @@
 mod files;
 mod icons;
 mod popups;
+mod repeat;
 mod search;
 mod sets;
 mod side;
@@ -89,6 +90,8 @@ pub struct Launch {
     pub edit_set: Option<String>,
     /// Start with this text in the search field (for screenshots).
     pub search: Option<String>,
+    /// Give the new-event dialog this repeat rule (for screenshots of Custom repeats).
+    pub repeat: Option<String>,
 }
 
 /// The `.ics` document the host opened (artcraftCloud's drive).
@@ -114,6 +117,7 @@ pub struct Inspector {
     pub start_text: String,
     pub end_text: String,
     pub confirm_delete: bool,
+    pub repeat: repeat::RepeatForm,
 }
 
 /// The new-event dialog.
@@ -127,6 +131,7 @@ pub struct NewEvent {
     pub start_text: String,
     pub end_text: String,
     pub focus_done: bool,
+    pub repeat: repeat::RepeatForm,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1577,6 +1582,10 @@ impl CalendarCraftApp {
         }
         if self.launch.new_event {
             self.open_new_event(self.selected_date, None);
+            if let (Some(rule), Some(ne)) = (self.launch.repeat.clone(), self.new_event.as_mut()) {
+                ne.draft.rrule = Some(rule).filter(|r| !r.trim().is_empty());
+                ne.repeat = repeat::RepeatForm::for_event(&ne.draft);
+            }
         }
         if let Some(tab) = self.launch.settings {
             self.settings_open = true;
