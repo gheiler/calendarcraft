@@ -382,7 +382,12 @@ impl CalendarEvent {
                 }
             }
             Some(rule) => {
-                let mut walls = crate::recur::occurrence_walls(rule, start, to_wall.date());
+                let mut walls = crate::recur::occurrence_walls_between(
+                    rule,
+                    start,
+                    from_wall.date() - Duration::days(2),
+                    to_wall.date(),
+                );
                 if let Some(until) = rule.until_utc {
                     walls.retain(|w| crate::recur::start_instant(&self.zone, *w) <= until);
                 }

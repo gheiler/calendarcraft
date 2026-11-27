@@ -12,6 +12,7 @@ pub mod model;
 pub mod net;
 pub mod nlp;
 pub mod recur;
+pub mod rrule;
 pub mod search;
 pub mod secrets;
 pub mod sync;

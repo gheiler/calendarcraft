@@ -11,7 +11,7 @@
 
 use chrono::{Datelike, Duration, NaiveDateTime, NaiveTime, Utc};
 use craft_ical::{
-    fold, format_rrule, param_value, parse_rrule,
+    fold, param_value,
     values::{self, escape_text, format_date, format_local, format_utc, unescape_text, When},
     write_vtimezone, ContentLine, Lines, TimeZones,
 };
@@ -387,6 +387,42 @@ fn dt_line(kind: &str, zone: &EventZone, wall: NaiveDateTime) -> String {
     }
 }
 
+/// The rule as it is written beside the event's `DTSTART`: every part kept as it was, with
+/// `UNTIL` in the form RFC 5545 asks for: a date for an all-day event, a UTC time beside a
+/// start in a zone (the end of that day there when the rule only had a day), and a local
+/// time beside a floating start.
+pub fn rrule_for_event(core: &str, ev: &CalendarEvent) -> String {
+    let Some(mut rule) = crate::rrule::RRule::parse(core) else {
+        return core.trim().to_string();
+    };
+    let Some(until) = rule.until else {
+        return core.trim().to_string();
+    };
+    let fixed = if ev.all_day || ev.start_time.is_none() {
+        When::Date(until.wall().date())
+    } else {
+        match &ev.zone {
+            EventZone::Floating => match until {
+                When::Date(d) => When::Local(crate::rrule::end_of_day(d)),
+                other => When::Local(other.wall()),
+            },
+            zone => {
+                let instant = match until {
+                    When::Utc(t) => t.and_utc().timestamp(),
+                    When::Date(d) => recur::start_instant(zone, crate::rrule::end_of_day(d)),
+                    When::Local(t) => recur::start_instant(zone, t),
+                };
+                When::Utc(chrono::DateTime::from_timestamp(instant, 0).map(|t| t.naive_utc()).unwrap_or(until.wall()))
+            }
+        }
+    };
+    if fixed == until {
+        return core.trim().to_string();
+    }
+    rule.until = Some(fixed);
+    rule.to_text()
+}
+
 /// One `VEVENT` block (without the calendar around it).
 pub fn write_event(ev: &CalendarEvent, out: &mut String, stamp: &str) {
     write_line(out, "BEGIN:VEVENT");
@@ -426,29 +462,7 @@ pub fn write_event(ev: &CalendarEvent, out: &mut String, stamp: &str) {
     }
     if let Some(rule) = &ev.rrule {
         let (core, _) = recur::split_exdates(rule);
-        let formatted = if ev.zone.is_floating() || ev.all_day {
-            parse_rrule(core)
-                .map(|r| {
-                    let start = ev.date.and_time(ev.start_time.unwrap_or(NaiveTime::MIN));
-                    if ev.all_day {
-                        craft_ical::rrule::format_for(&r, start, true)
-                    } else {
-                        format_rrule(&r)
-                    }
-                })
-                .unwrap_or_else(|| core.to_string())
-        } else if let EventZone::Tz(_) | EventZone::Utc = ev.zone {
-            parse_rrule(core)
-                .map(|r| {
-                    let start = ev.date.and_time(ev.start_time.unwrap_or(NaiveTime::MIN));
-                    let until = recur::parse(core).and_then(|p| p.until_utc);
-                    craft_ical::rrule::format_zoned(&r, start, until)
-                })
-                .unwrap_or_else(|| core.to_string())
-        } else {
-            core.to_string()
-        };
-        write_line(out, &format!("RRULE:{formatted}"));
+        write_line(out, &format!("RRULE:{}", rrule_for_event(core, ev)));
     }
     if !ev.exdates.is_empty() {
         if ev.all_day {
